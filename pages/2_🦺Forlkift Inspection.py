@@ -26,7 +26,7 @@ st.title("🦺 Forklift Daily Inspection")
 if os.path.exists("forklift.jpg"):
     st.image(Image.open("forklift.jpg"))
 
-# --- YouTube video (outside the form) ---
+# --- YouTube video ---
 if st.button("Forklift Inspection Video"):
     video_url = "https://www.youtube.com/watch?v=BZ6RHAkR7PU"
     DEFAULT_WIDTH = 80
@@ -37,6 +37,22 @@ if st.button("Forklift Inspection Video"):
 
 now = datetime.datetime.now()
 date_string = now.strftime("%Y-%m-%d %H:%M:%S")
+
+
+# =========================
+# Session defaults
+# =========================
+DEFAULTS = {
+    "enable_camera": False,
+    "picture_path": None,
+    "signature_path": None,
+    "name1": "Please Select",       # employee
+    "name2": "Please Select",       # forklift id
+    "sign": False,
+}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 
 # =========================
@@ -52,6 +68,7 @@ def get_gspread_client():
         st.secrets["gcp_service_account"], scopes=SCOPE
     )
     return gspread.authorize(creds)
+
 
 def send_email(to, subject, message, image_file=None, image_file_2=None):
     """Send Gmail alert with attachments using App Passwords."""
@@ -89,55 +106,27 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
 
 
 # =========================
-# Form (clears automatically on submit)
+# UI helpers
 # =========================
-with st.form(key="forklift_form", clear_on_submit=True):
-    # --- Top fields ---
-    date = st.date_input("Date", datetime.date.today())
-    employee_name = st.selectbox(
-        "Employee Name",
-        ["Please Select", "Simeon Papadopoulos", "Alexandridis Christos"],
-    )
-    forklift_id = st.selectbox(
-        "Number of Forklifts",
-        ["Please Select", "ME 119135", "ME 125321"],
-    )
-    hours = st.number_input("Operation Hours (float)", format="%.1f", step=0.1)
+def take_picture():
+    if st.button("📸 Enable Camera"):
+        st.session_state.enable_camera = True
 
-    st.markdown("---")
+    if st.session_state.get("enable_camera", False):
+        picture = st.camera_input("Take a Photo")
+        if picture is not None:
+            pic_path = "/tmp/Forklift_Damage.jpg"
+            with open(pic_path, "wb") as f:
+                f.write(picture.getbuffer())
+            st.image(picture, caption="Photo taken with camera")
+            st.session_state.picture_path = pic_path
 
-    # --- Inspection items ---
-    inspection_fields = [
-        {"name": "Brake Inspection"},
-        {"name": "Engine"},
-        {"name": "Lights"},
-        {"name": "Tires"},
-    ]
+    if st.button("📷 Disable Camera"):
+        st.session_state.enable_camera = False
 
-    checked = []
-    broken = []
-    comments = []
 
-    for i, field in enumerate(inspection_fields):
-        st.subheader(field["name"])
-        c1, c2 = st.columns(2)
-        with c1:
-            chk = st.checkbox("Checked", key=f"checked_{i}")
-        with c2:
-            brk = st.checkbox("Broken Down", key=f"broken_{i}")
-        com = st.text_area("Comments", max_chars=120, height=60, key=f"comment_{i}")
-        if brk and not com.strip():
-            st.warning(f"Please provide comments for {field['name']} breakdown.")
-        checked.append(chk)
-        broken.append(brk)
-        comments.append(com)
-
-    st.markdown("---")
-
-    # --- Optional media (simplified) ---
-    picture = st.camera_input("Take a Photo (optional)")
-    # Save to /tmp only on submit to avoid stale files
-    signature_canvas = st_canvas(
+def signature():
+    canvas = st_canvas(
         fill_color="rgba(255,165,0,0.3)",
         stroke_width=5,
         stroke_color="rgb(0,0,0)",
@@ -146,34 +135,80 @@ with st.form(key="forklift_form", clear_on_submit=True):
         drawing_mode="freedraw",
         key="canvas_forklift",
     )
+    if canvas.image_data is not None:
+        st.image(canvas.image_data)
+        img = Image.fromarray(canvas.image_data.astype("uint8"), "RGBA")
+        sig_path = "/tmp/signature.png"
+        img.save(sig_path)
+        st.session_state.signature_path = sig_path
 
-    submitted = st.form_submit_button("Submit_Form")
+
+def reset_form():
+    # reset fixed defaults
+    for k, v in DEFAULTS.items():
+        st.session_state[k] = v
+    # clear dynamic inspection fields
+    for i in range(50):
+        st.session_state[f"checked_{i}"] = False
+        st.session_state[f"broken_{i}"] = False
+        st.session_state[f"comment_{i}"] = ""
+    # reset widget-bound keys
+    st.session_state["name1"] = "Please Select"
+    st.session_state["name2"] = "Please Select"
+    st.rerun()
+
+
 
 # =========================
-# Handle submission
+# Form fields
 # =========================
-if submitted:
+date = st.date_input("Date", datetime.date.today())
+employee_name = st.selectbox(
+    "Employee Name",
+    ["Please Select", "Simeon Papadopoulos", "Alexandridis Christos"],
+    key="name1"
+)
+forklift_id = st.selectbox(
+    "Number of Forklifts",
+    ["Please Select", "ME 119135", "ME 125321"],
+    key="name2"
+)
+hours = st.number_input("Operation Hours (float)", format="%.1f", step=0.1)
+
+# Inspection items
+inspection_fields = [
+    {"name": "Brake Inspection"},
+    {"name": "Engine"},
+    {"name": "Lights"},
+    {"name": "Tires"},
+]
+
+for i, field in enumerate(inspection_fields):
+    st.subheader(field["name"])
+    st.checkbox("Checked", key=f"checked_{i}")
+    st.checkbox("Broken Down", key=f"broken_{i}")
+    st.text_area("Comments", max_chars=120, height=60, key=f"comment_{i}")
+    if st.session_state.get(f"broken_{i}", False) and not st.session_state.get(f"comment_{i}", "").strip():
+        st.warning(f"Please provide comments for {field['name']} breakdown.")
+
+take_picture()
+if st.checkbox("Signature", key="sign"):
+    signature()
+
+
+# =========================
+# Submit
+# =========================
+if st.button("Submit_Form"):
     # Validation
-    valid_rows = all(
-        checked[i] or (broken[i] and comments[i].strip())
+    valid = all(
+        st.session_state.get(f"checked_{i}", False) or
+        (st.session_state.get(f"broken_{i}", False) and st.session_state.get(f"comment_{i}", "").strip())
         for i in range(len(inspection_fields))
     )
-    if not valid_rows or employee_name == "Please Select" or forklift_id == "Please Select":
+    if not valid or employee_name == "Please Select" or forklift_id == "Please Select":
         st.warning("Please complete all required fields.")
         st.stop()
-
-    # Save media to /tmp now
-    picture_path = None
-    if picture is not None:
-        picture_path = "/tmp/Forklift_Damage.jpg"
-        with open(picture_path, "wb") as f:
-            f.write(picture.getbuffer())
-
-    signature_path = None
-    if signature_canvas.image_data is not None:
-        img = Image.fromarray(signature_canvas.image_data.astype("uint8"), "RGBA")
-        signature_path = "/tmp/signature.png"
-        img.save(signature_path)
 
     # Build row
     data = {
@@ -184,9 +219,9 @@ if submitted:
         "Operation": hours,
     }
     for i, field in enumerate(inspection_fields):
-        mark = f"{'X' if checked[i] else ''} {'B' if broken[i] else ''}".strip()
+        mark = f"{'X' if st.session_state.get(f'checked_{i}', False) else ''} {'B' if st.session_state.get(f'broken_{i}', False) else ''}".strip()
         data[field["name"]] = mark
-        data[f"{field['name']} Comments"] = comments[i]
+        data[f"{field['name']} Comments"] = st.session_state.get(f"comment_{i}", "")
 
     df = pd.DataFrame([data])
     st.write(df)
@@ -201,8 +236,10 @@ if submitted:
         ws.append_rows(df.values.tolist())
 
     # Alert email if critical broken
-    critical_names = {"Brake Inspection", "Engine"}
-    critical_broken = any(broken[i] and inspection_fields[i]["name"] in critical_names for i in range(len(inspection_fields)))
+    critical_broken = any(
+        st.session_state.get(f"broken_{i}", False) and inspection_fields[i]["name"] in ["Brake Inspection", "Engine"]
+        for i in range(len(inspection_fields))
+    )
     if critical_broken:
         to_addr = st.secrets["email"].get("to_alert", st.secrets["email"]["user"])
         subject = "Forklift Broken Down"
@@ -211,8 +248,12 @@ if submitted:
             to=to_addr,
             subject=subject,
             message=message,
-            image_file=picture_path,
-            image_file_2=signature_path,
+            image_file=st.session_state.get("picture_path"),
+            image_file_2=st.session_state.get("signature_path"),
         )
 
-    st.success("Form submitted successfully! The form has been cleared and is ready for a new entry.")
+    st.success("Form submitted successfully!")
+    
+    st.button("Submit Another Form", on_click=reset_form)
+
+   now does not clear anything
