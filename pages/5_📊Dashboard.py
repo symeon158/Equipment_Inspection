@@ -1,178 +1,197 @@
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import gspread_dataframe as gsdf
+import datetime as dt
+import os
+
 import pandas as pd
 import plotly.graph_objs as go
-import streamlit as st
 import plotly.express as px
+import streamlit as st
 
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
-scope = ['https://www.googleapis.com/auth/spreadsheets',
-          "https://www.googleapis.com/auth/drive"]
+# =========================
+# Google Sheets via Secrets
+# =========================
+SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
 
- 
-credentials = ServiceAccountCredentials.from_json_keyfile_name("gs_credentials.json", scope)
-client = gspread.authorize(credentials)
+def get_gspread_client():
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(
+        st.secrets["gcp_service_account"], scopes=SCOPE
+    )
+    return gspread.authorize(creds)
 
-# specify the sheet and worksheet
-sheet = client.open('Web_App')
-#worksheet = sheet.add_worksheet(title="Dashboard", rows=1000, cols=13)
-worksheet = sheet.worksheet('Dashboard')
-worksheet2 = sheet.worksheet('Sheet1')
-# get the values in the worksheet as a list of lists
-values = worksheet.get_all_values()
-values2 = worksheet2.get_all_values()
-# create a Pandas DataFrame from the values
-df = pd.DataFrame(values[1:], columns=values[0]).apply(pd.to_numeric, errors='ignore')
-df2 = pd.DataFrame(values2[1:], columns=values2[0]).apply(pd.to_numeric, errors='ignore')
-# drop rows and columns with all NaN values
-df.dropna(axis=0, how='all', inplace=True)
-df.dropna(axis=1, how='all', inplace=True)
-df2.dropna(axis=0, how='all', inplace=True)
-df2.dropna(axis=1, how='all', inplace=True)
-# do something with the DataFrame
-# Get max Operation value for each Forklift
-print(df2)
+# =========================
+# App
+# =========================
 st.set_page_config(page_title="Dashboard", layout="centered")
-st.title("📊Dashboard")
+st.title("📊 Dashboard")
 
-forklift_options = df['Forklift'].unique().tolist()
+# Connect
+client = get_gspread_client()
+sheet = client.open("Web_App")
+
+# Worksheets
+ws_dash = sheet.worksheet("Dashboard")  # metrics (Forklift, Operation, Date, hours, User, …)
+ws_raw  = sheet.worksheet("Sheet1")     # optional auxiliary data
+
+# Pull data
+values_dash = ws_dash.get_all_values()
+values_raw  = ws_raw.get_all_values()
+
+# To DataFrames
+df = pd.DataFrame(values_dash[1:], columns=values_dash[0])
+df2 = pd.DataFrame(values_raw[1:], columns=values_raw[0])
+
+# Clean empties
+df = df.dropna(how="all").copy()
+df2 = df2.dropna(how="all").copy()
+
+# -------- Type conversions (robust) --------
+# Dates
+for col in ["Date"]:
+    if col in df.columns:
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+
+# Numerics
+for col in ["Operation", "hours"]:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+# Strings (trim)
+for col in ["Forklift", "User"]:
+    if col in df.columns:
+        df[col] = df[col].astype(str).str.strip()
+
+# Remove rows missing key fields
+required = ["Forklift", "Operation"]
+df = df.dropna(subset=[c for c in required if c in df.columns]).copy()
+
+# ---------------- Sidebar selection ----------------
+if "Forklift" not in df.columns:
+    st.error("The 'Dashboard' worksheet must include a 'Forklift' column.")
+    st.stop()
+
+forklift_options = sorted([x for x in df["Forklift"].dropna().unique().tolist() if x != ""])
+if not forklift_options:
+    st.warning("No forklifts found in data.")
+    st.stop()
+
 selected_forklift = st.sidebar.radio("Select a forklift", forklift_options)
 
-max_operation = df[df['Forklift'] == selected_forklift]['Operation'].max()
-import datetime
-import streamlit as st
-if selected_forklift == 'Forklift 1':
-    next_service = 1000
-    
-else:
-    next_service = 500
-# Calculate the remaining hours
-remaining_hours = next_service - max_operation
+# ---------------- KPIs ----------------
+# Max operation for selected forklift
+if "Operation" not in df.columns:
+    st.error("The 'Dashboard' worksheet must include an 'Operation' column.")
+    st.stop()
 
-# Calculate the date of the next service
-now = datetime.datetime.now()
-days_to_next_service = remaining_hours / 24
-next_service_date = now + datetime.timedelta(days=days_to_next_service)
+max_operation = df.loc[df["Forklift"] == selected_forklift, "Operation"].max()
+if pd.isna(max_operation):
+    max_operation = 0
 
-# Create the reminder card
+# Service thresholds (example rule)
+next_service = 1000 if selected_forklift == "Forklift 1" else 500
+
+remaining_hours = max(0, next_service - float(max_operation))
+now = dt.datetime.now()
+# Basic heuristic: 24 hours/day utilization → estimate next service date
+days_to_next_service = (remaining_hours / 24.0) if remaining_hours > 0 else 0
+next_service_date = now + dt.timedelta(days=days_to_next_service)
+
 left_column, middle_column, right_column = st.columns(3)
 with left_column:
     st.subheader("Next Service:")
-    st.subheader(f"Hours {next_service:,}")
+    st.subheader(f"Hours {int(next_service):,}")
 with middle_column:
     st.subheader("Remaining Hours:")
-    st.subheader(f"{remaining_hours}")
+    st.subheader(f"{remaining_hours:.1f}")
 with right_column:
     st.subheader("Service Progress:")
-    st.progress(max_operation/next_service)
+    st.progress(min(max_operation / next_service, 1.0))
 
+st.caption(f"Estimated next service date: **{next_service_date.date()}**")
 st.markdown("""---""")
 
+# ---------------- Gauge ----------------
+overall_max = df["Operation"].max() if "Operation" in df.columns else next_service
+if pd.isna(overall_max) or overall_max <= 0:
+    overall_max = next_service
 
-# create bullet gauge figure
-fig = go.Figure(go.Indicator(
-    mode = "gauge+number",
-    value = max_operation,
-    title = {'text': "Operation Hours"},
-    gauge = {
-        'axis': {'range': [None, df['Operation'].max()]},
+fig_gauge = go.Figure(go.Indicator(
+    mode="gauge+number",
+    value=float(max_operation),
+    title={'text': "Operation Hours"},
+    gauge={
+        'axis': {'range': [0, float(overall_max)]},
         'bar': {'color': "darkblue"},
-        'steps' : [
-            {'range': [0, df['Operation'].max() / 3], 'color': "red"},
-            {'range': [df['Operation'].max() / 3, df['Operation'].max() * 2 / 3], 'color': "orange"},
-            {'range': [df['Operation'].max() * 2 / 3, df['Operation'].max()], 'color': "green"}],
-        'threshold': {
-            'line': {'color': "red", 'width': 4},
-            'thickness': 0.75,
-            'value': df['Operation'].max()}}))
+        'steps': [
+            {'range': [0, overall_max / 3], 'color': "red"},
+            {'range': [overall_max / 3, overall_max * 2 / 3], 'color': "orange"},
+            {'range': [overall_max * 2 / 3, overall_max], 'color': "green"}
+        ],
+        'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': float(overall_max)}
+    }
+))
+st.plotly_chart(fig_gauge, use_container_width=True)
 
-# display bullet gauge figure
-st.plotly_chart(fig)
+# ---------------- Time-series views ----------------
+df_f = df.loc[df["Forklift"] == selected_forklift].copy()
 
+if "Date" in df_f.columns and "hours" in df_f.columns:
+    # Ensure sorted by date
+    df_f = df_f.sort_values("Date")
+    # Line chart (daily)
+    fig_line = go.Figure(data=go.Scatter(
+        x=df_f["Date"], y=df_f["hours"], mode="lines", name="Daily Hours"
+    ))
+    fig_line.update_layout(title="Forklift Hours over Time", xaxis_title="Date", yaxis_title="Hours")
 
+    # Year-Month aggregation
+    df_f["Year-Month"] = df_f["Date"].dt.strftime("%Y-%m")
+    df_sum = df_f.groupby("Year-Month", as_index=False)["hours"].sum()
+    df_mean = df_f.groupby("Year-Month", as_index=False)["hours"].mean()
 
-# Filter data by the selected forklift
-df_filtered = df[df['Forklift'] == selected_forklift]
+    fig_y_m = go.Figure()
+    fig_y_m.add_trace(go.Bar(x=df_sum["Year-Month"], y=df_sum["hours"], name="Sum of Hours"))
+    fig_y_m.add_trace(go.Scatter(x=df_mean["Year-Month"], y=df_mean["hours"], mode="lines", name="Avg Daily Hours"))
+    fig_y_m.update_layout(title="Hours by Year-Month", xaxis_title="Year-Month", yaxis_title="Hours")
 
-# Create a line chart of forklift hours over time
-fig1 = go.Figure(data=go.Scatter(x=df_filtered['Date'], y=df_filtered['hours'], mode='lines'))
-
-# Set the plot title and axis labels
-fig1.update_layout(title='Forklift Hours over Time', xaxis_title='Date', yaxis_title='Hours')
-
-# Display the plot
-
-
-# Create a bar chart of total hours and a line chart of average daily hours by year-month
-df_filtered['Date'] = pd.to_datetime(df_filtered['Date'])
-df_filtered['Year-Month'] = df_filtered['Date'].dt.strftime('%Y-%m')
-
-# Group by Year-Month and calculate the sum of hours
-df_sum = df_filtered.groupby('Year-Month')['hours'].sum().reset_index()
-
-# Group by Year-Month and calculate the mean of hours
-df_mean = df_filtered.groupby('Year-Month')['hours'].mean().reset_index()
-
-fig2 = go.Figure()
-
-# Add the bar chart for sum of hours
-fig2.add_trace(go.Bar(x=df_sum['Year-Month'], y=df_sum['hours'], name='Sum of Hours'))
-
-# Add the line chart for average daily hours
-fig2.add_trace(go.Scatter(x=df_mean['Year-Month'], y=df_mean['hours'], mode='lines', name='Avg Daily Hours'))
-
-fig2.update_layout(title='Hours by Year-Month', xaxis_title='Year-Month', yaxis_title='Hours')
-
-# Display the plot
-
-
-view_type = st.radio("Select a view", ("Year-Month", "Daily Hours"),horizontal=True)
-if view_type == "Year-Month":
-    st.plotly_chart(fig2)
+    view_type = st.radio("Select a view", ("Year-Month", "Daily Hours"), horizontal=True)
+    st.plotly_chart(fig_y_m if view_type == "Year-Month" else fig_line, use_container_width=True)
 else:
-    st.plotly_chart(fig1)  
+    st.info("Time-series not shown (need 'Date' and 'hours' columns).")
 
-# calculate the count and percentage of each user
-user_count = df['User'].value_counts()
-user_percent = user_count / user_count.sum() * 100
+# ---------------- User distribution pie ----------------
+if "User" in df.columns:
+    user_count = df["User"].value_counts(dropna=True)
+    if len(user_count) > 0:
+        fig_pie = px.pie(names=user_count.index, values=user_count.values, title="User Distribution")
+        fig_pie.update_traces(textinfo="percent+label")
+        st.plotly_chart(fig_pie, use_container_width=True)
+    else:
+        st.info("No user data to display.")
+else:
+    st.info("Column 'User' not found for distribution chart.")
 
-# create the pie chart using Plotly
-fig = px.pie(names=user_count.index, values=user_count.values, title='User Distribution')
+# ---------------- Component inspections (stacked) ----------------
+components = [c for c in ["Brake Inspection", "Engine", "Lights", "Tires"] if c in df.columns]
+if components and "User" in df.columns:
+    fig_stack = go.Figure()
+    for comp in components:
+        # coerce to numeric; missing → 0
+        yvals = pd.to_numeric(df[comp], errors="coerce").fillna(0)
+        fig_stack.add_trace(go.Bar(name=comp, x=df["User"], y=yvals))
+    fig_stack.update_layout(
+        title="Inspections by Component and User",
+        xaxis_title="User",
+        yaxis_title="Number of Inspections",
+        barmode="stack"
+    )
+    st.plotly_chart(fig_stack, use_container_width=True)
+else:
+    st.info("Component columns not found (need any of: Brake Inspection, Engine, Lights, Tires).")
 
-# add the percentage labels to the chart
-fig.update_traces(textinfo='percent+label')
-
-# display the chart in Streamlit
-st.plotly_chart(fig)
-
-
-
-# Create a stacked bar plot of inspections by component and user
-fig = go.Figure(data=[
-    go.Bar(name='Brake Inspection', x=df['User'], y=df['Brake Inspection']),
-    go.Bar(name='Engine', x=df['User'], y=df['Engine']),
-    go.Bar(name='Lights', x=df['User'], y=df['Lights']),
-    go.Bar(name='Tires', x=df['User'], y=df['Tires'])
-])
-
-# Set the plot title and axis labels
-fig.update_layout(title='Inspections by Component and User', xaxis_title='User', yaxis_title='Number of Inspections', barmode='stack')
-
-# Display the plot
-st.plotly_chart(fig)
-
-
-
-
- 
-
-    
-
-
-
-
-
-
-
-
+# Optional: preview auxiliary sheet
+# st.write(df2.head())
