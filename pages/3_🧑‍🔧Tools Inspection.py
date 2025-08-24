@@ -2,23 +2,19 @@ import os
 import io
 import datetime
 import pandas as pd
+import numpy as np
 import streamlit as st
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
-# Optional imports (guarded)
+# QR scanner (browser) – enlarged via CSS below
 HAS_BROWSER_QR = True
 try:
     from streamlit_qrcode_scanner import qrcode_scanner
 except Exception:
     HAS_BROWSER_QR = False
 
-HAS_WEBRTC = True
-try:
-    from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
-except Exception:
-    HAS_WEBRTC = False
-
+# Optional static decode (snapshot/upload) with pyzbar + OpenCV
 HAS_PYZBAR = True
 try:
     import cv2
@@ -36,6 +32,29 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
+
+
+# =========================
+# Page & CSS (make scanner big on tablets)
+# =========================
+st.set_page_config(page_title="Tools Inspection", layout="wide")
+st.markdown("""
+<style>
+/* Make camera/video surfaces fill width & be taller */
+video, canvas {
+  width: 100% !important;
+  height: auto !important;
+  max-height: 70vh !important;
+}
+
+/* Give the main container some breathing room */
+.block-container {
+  padding-top: 1rem;
+  padding-left: 2rem;
+  padding-right: 2rem;
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 # =========================
@@ -77,19 +96,19 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 def send_email(to, subject, message, image_file=None, image_file_2=None):
+    """Gmail with TLS (587) and SSL (465) fallback. Uses Streamlit secrets."""
     cfg = st.secrets["email"]
     from_address = cfg["user"]
     password = cfg["app_password"]
-    smtp_host = cfg.get("smtp_host", "smtp.gmail.com")
-    smtp_port = int(cfg.get("smtp_port", 587))
+    host = cfg.get("smtp_host", "smtp.gmail.com")
+    port_tls = int(cfg.get("smtp_port", 587))
 
     msg = MIMEMultipart()
     msg["From"] = from_address
-    msg["To"] = to
+    msg["To"] = to if isinstance(to, str) else ", ".join(to)
     msg["Subject"] = subject
     msg.attach(MIMEText(message, "plain"))
 
-    # Attach images if present
     for path, fname in [(image_file, "picture.jpg"), (image_file_2, "signature.png")]:
         if path and os.path.exists(path):
             with open(path, "rb") as f:
@@ -97,39 +116,39 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
                 img.add_header("Content-Disposition", "attachment", filename=fname)
                 msg.attach(img)
 
+    # Try STARTTLS
     try:
-        server = smtplib.SMTP(smtp_host, smtp_port)
+        server = smtplib.SMTP(host, port_tls)
+        server.ehlo()
         server.starttls()
+        server.ehlo()
         server.login(from_address, password)
-        server.sendmail(from_address, [to], msg.as_string())
+        server.sendmail(from_address, [to] if isinstance(to, str) else to, msg.as_string())
         server.quit()
-        st.success("Email sent successfully!")
+        st.success("Email sent via TLS (587)!")
+        return
     except Exception as e:
-        st.error(f"Error sending email: {e}")
+        st.warning(f"TLS failed: {e}")
+
+    # Fallback to SSL 465
+    try:
+        server = smtplib.SMTP_SSL(host, 465)
+        server.login(from_address, password)
+        server.sendmail(from_address, [to] if isinstance(to, str) else to, msg.as_string())
+        server.quit()
+        st.success("Email sent via SSL (465)!")
+    except Exception as e:
+        st.error(f"SSL failed: {e}")
 
 
 # =========================
-# QR helpers
+# QR helpers (snapshot/upload)
 # =========================
-class QRTransformer(VideoTransformerBase):
-    """WebRTC frame decoder using pyzbar."""
-    def __init__(self):
-        self.last_code = None
-
-    def transform(self, frame):
-        if not HAS_PYZBAR:
-            return frame.to_ndarray(format="bgr24")
-        img = frame.to_ndarray(format="bgr24")
-        codes = pyzbar_decode(img)
-        if codes:
-            self.last_code = codes[0].data.decode("utf-8")
-        return img
-
 def decode_image_bytes(image_bytes: bytes) -> str | None:
     """Decode QR from an image buffer using pyzbar."""
     if not HAS_PYZBAR:
         return None
-    file_bytes = np.frombuffer(image_bytes, dtype='uint8')  # type: ignore
+    file_bytes = np.frombuffer(image_bytes, dtype='uint8')
     img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     if img is None:
         return None
@@ -138,66 +157,12 @@ def decode_image_bytes(image_bytes: bytes) -> str | None:
         return codes[0].data.decode("utf-8")
     return None
 
-def decode_pil_image(pil: Image.Image) -> str | None:
-    """Decode QR from a PIL image using pyzbar."""
-    if not HAS_PYZBAR:
-        return None
-    rgb = pil.convert("RGB")
-    np_img = cv2.cvtColor(np.array(rgb), cv2.COLOR_RGB2BGR)  # type: ignore
-    codes = pyzbar_decode(np_img)
-    if codes:
-        return codes[0].data.decode("utf-8")
-    return None
-
 
 # =========================
-# UI helpers
+# UI
 # =========================
-def signature():
-    canvas_result = st_canvas(
-        fill_color="rgba(255, 165, 0, 0.3)",
-        stroke_width=5,
-        stroke_color="rgb(0, 0, 0)",
-        background_color="rgba(255, 255, 255, 1)",
-        height=150,
-        drawing_mode="freedraw",
-        key="canvas_tools",
-    )
-    if canvas_result.image_data is not None:
-        st.image(canvas_result.image_data)
-        img = Image.fromarray(canvas_result.image_data.astype("uint8"), "RGBA")
-        sig_path = "/tmp/image1.png"
-        img.save(sig_path)
-        st.session_state.signature_path = sig_path
-
-def reset_form():
-    for k, v in DEFAULTS.items():
-        st.session_state[k] = v
-
-def take_picture():
-    if st.button("📸 Enable Camera"):
-        st.session_state.enable_camera = True
-
-    if st.session_state.get("enable_camera", False):
-        picture = st.camera_input("Take a Photo")
-        if picture is not None:
-            pic_path = "/tmp/picture.jpg"
-            with open(pic_path, "wb") as file:
-                file.write(picture.getbuffer())
-            st.image(picture, caption="Photo taken with camera")
-            st.session_state.picture_path = pic_path
-
-    if st.button("📷 Disable Camera"):
-        st.session_state.enable_camera = False
-
-
-# =========================
-# App
-# =========================
-st.set_page_config(page_title="Tools Inspection", layout="centered")
 st.title("⚙️ Tools Inspection")
 
-# Optional banner
 if os.path.exists("Tools.png"):
     st.image(Image.open("Tools.png"))
 
@@ -223,50 +188,34 @@ equipment = col1.selectbox("Equipment", equipments, key="unique_key_2")
 if equipment:
     st.session_state.equipment_input = equipment
 
-# ----- QR section -----
 with col2:
-    st.write("🔎 QR Scanner")
+    st.subheader("🔎 QR Scanner")
     qr_mode = st.selectbox(
         "Mode",
-        ["Browser Scanner", "WebRTC Live", "Snapshot/Upload"],
-        index=["Browser Scanner", "WebRTC Live", "Snapshot/Upload"].index(st.session_state.qr_mode),
+        ["Browser Scanner", "Snapshot/Upload"],
+        index=["Browser Scanner", "Snapshot/Upload"].index(st.session_state.qr_mode),
         key="qr_mode"
     )
 
     if qr_mode == "Browser Scanner":
         if not HAS_BROWSER_QR:
-            st.warning("Browser QR scanner not available. Try another mode.")
+            st.warning("Browser QR scanner not available. Try Snapshot/Upload.")
         else:
-            # Start/Stop control
+            # Start/Stop controls (full-width area, bigger preview due to CSS above)
             if not st.session_state.scanning:
-                if st.button("📷 Start Scanning"):
+                if st.button("📷 Start Scanning", use_container_width=True):
                     st.session_state.scanning = True
             else:
                 code = qrcode_scanner(key="qr_tools")
                 if code:
                     st.session_state.equipment_input = code
-                    st.session_state.scanning = False
                     st.success(f"QR: {code}")
-                if st.button("❌ Stop Scanning"):
+                    st.session_state.scanning = False
+                if st.button("❌ Stop Scanning", use_container_width=True):
                     st.session_state.scanning = False
 
-    elif qr_mode == "WebRTC Live":
-        if not (HAS_WEBRTC and HAS_PYZBAR):
-            st.warning("WebRTC/pyzbar not available. Try another mode.")
-        else:
-            st.info("Allow camera permissions. Scanning runs live; when a code is detected it fills the field.")
-            ctx = webrtc_streamer(
-                key="webrtc-tools",
-                video_transformer_factory=QRTransformer,
-                media_stream_constraints={"video": True, "audio": False},
-            )
-            if ctx and ctx.video_transformer:
-                if ctx.video_transformer.last_code:
-                    st.session_state.equipment_input = ctx.video_transformer.last_code
-                    st.success(f"QR: {ctx.video_transformer.last_code}")
-
-    else:  # Snapshot/Upload
-        st.caption("Take a photo or upload an image with a QR code; we’ll decode it.")
+    else:  # Snapshot / Upload
+        st.caption("Take a photo or upload an image with a QR code; static decoding is often more accurate.")
         upl = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"], accept_multiple_files=False, key="qr_upload")
         snap = st.camera_input("Or take a snapshot")
 
@@ -280,9 +229,9 @@ with col2:
             st.session_state.equipment_input = decoded_val
             st.success(f"QR: {decoded_val}")
         elif (upl or snap) and not decoded_val:
-            st.warning("Could not detect a QR code in the image. Try closer, better lighting, or higher contrast.")
+            st.warning("Could not detect a QR code. Try closer, steady, good lighting, and higher contrast.")
 
-# Display selected equipment
+# Display selected equipment (free text field the user can edit as well)
 st.text_input("Selected Equipment:", value=st.session_state.equipment_input)
 
 transaction_type = st.selectbox("Transaction Type", ["Please Select", "Check In", "Check Out"], key="unique_key_3")
@@ -302,14 +251,55 @@ if situation == "Broken Down":
     else:
         st.session_state["warning_displayed"] = False
 
-# Media capture
+
+# =========================
+# Media capture & Signature
+# =========================
+def take_picture():
+    if st.button("📸 Enable Camera"):
+        st.session_state.enable_camera = True
+
+    if st.session_state.get("enable_camera", False):
+        picture = st.camera_input("Take a Photo")
+        if picture is not None:
+            pic_path = "/tmp/picture.jpg"
+            with open(pic_path, "wb") as file:
+                file.write(picture.getbuffer())
+            st.image(picture, caption="Photo taken with camera")
+            st.session_state.picture_path = pic_path
+
+    if st.button("📷 Disable Camera"):
+        st.session_state.enable_camera = False
+
+def signature():
+    canvas_result = st_canvas(
+        fill_color="rgba(255, 165, 0, 0.3)",
+        stroke_width=5,
+        stroke_color="rgb(0, 0, 0)",
+        background_color="rgba(255, 255, 255, 1)",
+        height=150,
+        drawing_mode="freedraw",
+        key="canvas_tools",
+    )
+    if canvas_result.image_data is not None:
+        st.image(canvas_result.image_data)
+        img = Image.fromarray(canvas_result.image_data.astype("uint8"), "RGBA")
+        sig_path = "/tmp/image1.png"
+        img.save(sig_path)
+        st.session_state.signature_path = sig_path
+
 take_picture()
 if st.checkbox("Signature", key="sign"):
     signature()
 
+
 # =========================
 # Submit
 # =========================
+def reset_form():
+    for k, v in DEFAULTS.items():
+        st.session_state[k] = v
+
 if st.button("Submit"):
     # Validate basic fields
     if (
