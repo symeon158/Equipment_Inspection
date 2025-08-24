@@ -13,8 +13,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
-
+from email.mime_image import MIMEImage  # NOTE: keep as from email.mime.image import MIMEImage in your env
 
 # =========================
 # Page config
@@ -38,7 +37,6 @@ if st.button("Forklift Inspection Video"):
 now = datetime.datetime.now()
 date_string = now.strftime("%Y-%m-%d %H:%M:%S")
 
-
 # =========================
 # Session defaults
 # =========================
@@ -46,15 +44,38 @@ DEFAULTS = {
     "enable_camera": False,
     "picture_path": None,
     "signature_path": None,
-    "name1": "Please Select",       # employee
-    "name2": "Please Select",       # forklift id
+    "name1": "Please Select",   # employee
+    "name2": "Please Select",   # forklift id
     "sign": False,
-    "can_reset": False,             # flag to show reset button after submit
+    "can_reset": False,         # show "Submit Another Form" button
+    "_do_reset": False,         # internal flag to reset on next run
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
+# =========================
+# Pre-widget reset (runs BEFORE any widgets are created)
+# =========================
+if st.session_state.get("_do_reset", False):
+    # remove dynamic checklist keys
+    for key in list(st.session_state.keys()):
+        if key.startswith(("checked_", "broken_", "comment_")):
+            st.session_state.pop(key, None)
+
+    # pop widget-bound keys so widgets re-initialize with default values
+    for k in ["name1", "name2", "sign"]:
+        st.session_state.pop(k, None)
+
+    # clear media state
+    st.session_state["enable_camera"] = False
+    st.session_state["picture_path"] = None
+    st.session_state["signature_path"] = None
+
+    # hide reset button after clearing
+    st.session_state["can_reset"] = False
+    st.session_state["_do_reset"] = False
+    # Note: no widgets have been instantiated yet, so this is safe.
 
 # =========================
 # Secrets-based clients
@@ -69,7 +90,6 @@ def get_gspread_client():
         st.secrets["gcp_service_account"], scopes=SCOPE
     )
     return gspread.authorize(creds)
-
 
 def send_email(to, subject, message, image_file=None, image_file_2=None):
     """Send Gmail alert with attachments using App Passwords."""
@@ -105,7 +125,6 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
         server.sendmail(from_address, [to], msg.as_string())
         server.quit()
 
-
 # =========================
 # UI helpers
 # =========================
@@ -125,7 +144,6 @@ def take_picture():
     if st.button("📷 Disable Camera"):
         st.session_state.enable_camera = False
 
-
 def signature():
     canvas = st_canvas(
         fill_color="rgba(255,165,0,0.3)",
@@ -143,27 +161,8 @@ def signature():
         img.save(sig_path)
         st.session_state.signature_path = sig_path
 
-
-def reset_form():
-    # reset fixed defaults
-    for k, v in DEFAULTS.items():
-        st.session_state[k] = v
-    # clear dynamic inspection fields
-    for i in range(50):
-        st.session_state[f"checked_{i}"] = False
-        st.session_state[f"broken_{i}"] = False
-        st.session_state[f"comment_{i}"] = ""
-    # reset widget-bound keys
-    st.session_state["name1"] = "Please Select"
-    st.session_state["name2"] = "Please Select"
-    st.session_state["enable_camera"] = False
-    st.session_state["picture_path"] = None
-    st.session_state["signature_path"] = None
-    # NOTE: no st.rerun() here
-
-
 # =========================
-# Form fields
+# Form fields (widgets start here)
 # =========================
 date = st.date_input("Date", datetime.date.today())
 employee_name = st.selectbox(
@@ -198,7 +197,6 @@ take_picture()
 if st.checkbox("Signature", key="sign"):
     signature()
 
-
 # =========================
 # Submit
 # =========================
@@ -222,7 +220,7 @@ if st.button("Submit_Form"):
         "Operation": hours,
     }
     for i, field in enumerate(inspection_fields):
-        mark = f"{'X' if st.session_state.get(f"checked_{i}", False) else ''} {'B' if st.session_state.get(f"broken_{i}", False) else ''}".strip()
+        mark = f"{'X' if st.session_state.get(f'checked_{i}', False) else ''} {'B' if st.session_state.get(f'broken_{i}', False) else ''}".strip()
         data[field["name"]] = mark
         data[f"{field['name']} Comments"] = st.session_state.get(f"comment_{i}", "")
 
@@ -256,13 +254,13 @@ if st.button("Submit_Form"):
         )
 
     st.success("Form submitted successfully!")
-    st.session_state["can_reset"] = True  # show reset button on next render
+    st.session_state["can_reset"] = True  # show reset button next render
 
 # =========================
 # Reset button (outside submit block)
 # =========================
 if st.session_state.get("can_reset", False):
     if st.button("Submit Another Form"):
-        reset_form()
-        st.session_state["can_reset"] = False
+        # don't mutate widget keys now; just set the flag and rerun
+        st.session_state["_do_reset"] = True
         st.rerun()
