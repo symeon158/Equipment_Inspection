@@ -64,7 +64,7 @@ st.title("📚 Tables Report")
 client = get_gspread_client()
 sheet = client.open("Web_App")
 
-ws_dashboard = sheet.worksheet("Dashboard")   # Forklift log (contains 'B' markers)
+ws_dashboard = sheet.worksheet("Forklift")   # Forklift log (contains 'B' markers)
 ws_tools     = sheet.worksheet("Sheet1")      # Tools transactions (your columns)
 ws_forklift  = sheet.worksheet("Forklift")    # Not used below, but kept if you need later
 
@@ -192,3 +192,4 @@ else:
     fig_f = go.Figure(data=[table_f])
     fig_f.update_layout(height=420, title="🏎️ Forklift Breakdown Report (Dashboard)")
     st.plotly_chart(fig_f, use_container_width=True)
+
