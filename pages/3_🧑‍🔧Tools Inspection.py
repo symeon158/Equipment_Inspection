@@ -1,23 +1,30 @@
 import os
+import io
 import datetime
 import pandas as pd
 import streamlit as st
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
-# Optional QR scanning libs (browser first, then OpenCV/pyzbar fallback)
+# Optional imports (guarded)
+HAS_BROWSER_QR = True
 try:
     from streamlit_qrcode_scanner import qrcode_scanner
-    HAS_QR_SCANNER = True
 except Exception:
-    HAS_QR_SCANNER = False
+    HAS_BROWSER_QR = False
 
+HAS_WEBRTC = True
+try:
+    from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+except Exception:
+    HAS_WEBRTC = False
+
+HAS_PYZBAR = True
 try:
     import cv2
     from pyzbar.pyzbar import decode as pyzbar_decode
-    HAS_OPENCV = True
 except Exception:
-    HAS_OPENCV = False
+    HAS_PYZBAR = False
 
 # Google Sheets
 import gspread
@@ -32,21 +39,37 @@ from email.mime.image import MIMEImage
 
 
 # =========================
-# CONFIG (from Secrets)
+# Session defaults
+# =========================
+DEFAULTS = {
+    "warning_displayed": False,
+    "enable_camera": False,
+    "equipment_input": "",
+    "comments": "",
+    "sign": False,
+    "picture_path": None,
+    "signature_path": None,
+    "unique_key_1": "Please Select",   # employee
+    "unique_key_2": "",                # equipment dropdown
+    "unique_key_3": "Please Select",   # transaction
+    "unique_key_4": "Please Select",   # situation
+    "unique_key_6": "",                # comments key
+    "qr_mode": "Browser Scanner",      # selected QR mode
+    "scanning": False,                 # browser scanner toggle
+}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+
+# =========================
+# Config & Secrets
 # =========================
 SCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
 
-# Expect st.secrets sections:
-# [gcp_service_account] ... (full service account JSON fields)
-# [email]
-# user = "your_gmail@gmail.com"
-# app_password = "16-char-app-password"
-# smtp_host = "smtp.gmail.com"
-# smtp_port = 587
-# to_alert = "recipient@example.com"
 def get_gspread_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(
         st.secrets["gcp_service_account"], scopes=SCOPE
@@ -66,8 +89,8 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
     msg["Subject"] = subject
     msg.attach(MIMEText(message, "plain"))
 
-    # Attach images if available
-    for path, fname in [(image_file, "picture.jpg"), (image_file_2, "image1.png")]:
+    # Attach images if present
+    for path, fname in [(image_file, "picture.jpg"), (image_file_2, "signature.png")]:
         if path and os.path.exists(path):
             with open(path, "rb") as f:
                 img = MIMEImage(f.read())
@@ -86,7 +109,49 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
 
 
 # =========================
-# Helpers
+# QR helpers
+# =========================
+class QRTransformer(VideoTransformerBase):
+    """WebRTC frame decoder using pyzbar."""
+    def __init__(self):
+        self.last_code = None
+
+    def transform(self, frame):
+        if not HAS_PYZBAR:
+            return frame.to_ndarray(format="bgr24")
+        img = frame.to_ndarray(format="bgr24")
+        codes = pyzbar_decode(img)
+        if codes:
+            self.last_code = codes[0].data.decode("utf-8")
+        return img
+
+def decode_image_bytes(image_bytes: bytes) -> str | None:
+    """Decode QR from an image buffer using pyzbar."""
+    if not HAS_PYZBAR:
+        return None
+    file_bytes = np.frombuffer(image_bytes, dtype='uint8')  # type: ignore
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    codes = pyzbar_decode(img)
+    if codes:
+        return codes[0].data.decode("utf-8")
+    return None
+
+def decode_pil_image(pil: Image.Image) -> str | None:
+    """Decode QR from a PIL image using pyzbar."""
+    if not HAS_PYZBAR:
+        return None
+    rgb = pil.convert("RGB")
+    np_img = cv2.cvtColor(np.array(rgb), cv2.COLOR_RGB2BGR)  # type: ignore
+    codes = pyzbar_decode(np_img)
+    if codes:
+        return codes[0].data.decode("utf-8")
+    return None
+
+
+# =========================
+# UI helpers
 # =========================
 def signature():
     canvas_result = st_canvas(
@@ -105,20 +170,9 @@ def signature():
         img.save(sig_path)
         st.session_state.signature_path = sig_path
 
-
 def reset_form():
-    st.session_state.unique_key_1 = "Please Select"
-    st.session_state.unique_key_2 = ""
-    st.session_state.unique_key_3 = "Please Select"
-    st.session_state.unique_key_4 = "Please Select"
-    st.session_state.equipment_input = ""
-    st.session_state.unique_key_6 = ""
-    st.session_state.enable_camera = False
-    st.session_state.sign = False
-    st.session_state.warning_displayed = False
-    st.session_state.picture_path = None
-    st.session_state.signature_path = None
-
+    for k, v in DEFAULTS.items():
+        st.session_state[k] = v
 
 def take_picture():
     if st.button("📸 Enable Camera"):
@@ -137,37 +191,13 @@ def take_picture():
         st.session_state.enable_camera = False
 
 
-def scan_qr_code_opencv():
-    """Fallback scanner using OpenCV (may not work on Streamlit Cloud)."""
-    if not HAS_OPENCV:
-        st.error("OpenCV/pyzbar not available in this environment.")
-        return None
-
-    cap = cv2.VideoCapture(0)
-    result = None
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            values = pyzbar_decode(frame)
-            if values:
-                result = values[0].data.decode("utf-8")
-                break
-
-            # No cv2.imshow in Streamlit Cloud — skip UI window.
-            # Break via timeout or add a stop button in real usage.
-    finally:
-        cap.release()
-    return result
-
-
 # =========================
-# UI
+# App
 # =========================
+st.set_page_config(page_title="Tools Inspection", layout="centered")
 st.title("⚙️ Tools Inspection")
 
+# Optional banner
 if os.path.exists("Tools.png"):
     st.image(Image.open("Tools.png"))
 
@@ -189,27 +219,68 @@ employee_name = st.selectbox("Employee Name", employee_names, key="unique_key_1"
 col1, col2 = st.columns([1, 2])
 equipment = col1.selectbox("Equipment", equipments, key="unique_key_2")
 
-if "equipment_input" not in st.session_state:
-    st.session_state.equipment_input = ""
-
-col2.write("🕵️ Click to scan a QR code.")
+# Keep text field in sync
 if equipment:
     st.session_state.equipment_input = equipment
 
-if col2.button("Scan"):
-    scanned_value = None
-    if HAS_QR_SCANNER:
-        # Browser-based QR scanning
-        scanned_value = qrcode_scanner(key="qr_tools")
-    elif HAS_OPENCV:
-        scanned_value = scan_qr_code_opencv()
-    else:
-        st.warning("QR scanning not available; please type or choose from the list.")
+# ----- QR section -----
+with col2:
+    st.write("🔎 QR Scanner")
+    qr_mode = st.selectbox(
+        "Mode",
+        ["Browser Scanner", "WebRTC Live", "Snapshot/Upload"],
+        index=["Browser Scanner", "WebRTC Live", "Snapshot/Upload"].index(st.session_state.qr_mode),
+        key="qr_mode"
+    )
 
-    if scanned_value:
-        st.session_state.equipment_input = scanned_value
-    elif equipment:
-        st.session_state.equipment_input = equipment
+    if qr_mode == "Browser Scanner":
+        if not HAS_BROWSER_QR:
+            st.warning("Browser QR scanner not available. Try another mode.")
+        else:
+            # Start/Stop control
+            if not st.session_state.scanning:
+                if st.button("📷 Start Scanning"):
+                    st.session_state.scanning = True
+            else:
+                code = qrcode_scanner(key="qr_tools")
+                if code:
+                    st.session_state.equipment_input = code
+                    st.session_state.scanning = False
+                    st.success(f"QR: {code}")
+                if st.button("❌ Stop Scanning"):
+                    st.session_state.scanning = False
+
+    elif qr_mode == "WebRTC Live":
+        if not (HAS_WEBRTC and HAS_PYZBAR):
+            st.warning("WebRTC/pyzbar not available. Try another mode.")
+        else:
+            st.info("Allow camera permissions. Scanning runs live; when a code is detected it fills the field.")
+            ctx = webrtc_streamer(
+                key="webrtc-tools",
+                video_transformer_factory=QRTransformer,
+                media_stream_constraints={"video": True, "audio": False},
+            )
+            if ctx and ctx.video_transformer:
+                if ctx.video_transformer.last_code:
+                    st.session_state.equipment_input = ctx.video_transformer.last_code
+                    st.success(f"QR: {ctx.video_transformer.last_code}")
+
+    else:  # Snapshot/Upload
+        st.caption("Take a photo or upload an image with a QR code; we’ll decode it.")
+        upl = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"], accept_multiple_files=False, key="qr_upload")
+        snap = st.camera_input("Or take a snapshot")
+
+        decoded_val = None
+        if upl is not None:
+            decoded_val = decode_image_bytes(upl.getvalue()) if HAS_PYZBAR else None
+        elif snap is not None:
+            decoded_val = decode_image_bytes(snap.getvalue()) if HAS_PYZBAR else None
+
+        if decoded_val:
+            st.session_state.equipment_input = decoded_val
+            st.success(f"QR: {decoded_val}")
+        elif (upl or snap) and not decoded_val:
+            st.warning("Could not detect a QR code in the image. Try closer, better lighting, or higher contrast.")
 
 # Display selected equipment
 st.text_input("Selected Equipment:", value=st.session_state.equipment_input)
@@ -220,15 +291,16 @@ situation = st.selectbox("Situation", ["Please Select", "Checked", "Broken Down"
 def clear_warning():
     st.session_state.warning_displayed = False
 
-# Show warning if Broken Down without comments
-if situation == "Broken Down":
-    if st.session_state.warning_displayed or not st.session_state.get("comments", ""):
-        st.warning(f"Please provide comments for {st.session_state.equipment_input} breakdown.")
-    else:
-        st.session_state.warning_displayed = True
-
 comments = st.text_area("Comments", key="unique_key_6", on_change=clear_warning)
 st.session_state.comments = comments
+
+# Require comments if Broken Down
+if situation == "Broken Down":
+    if not st.session_state.get("comments", "").strip():
+        st.warning(f"Please provide comments for {st.session_state.get('equipment_input','')} breakdown.")
+        st.session_state["warning_displayed"] = True
+    else:
+        st.session_state["warning_displayed"] = False
 
 # Media capture
 take_picture()
@@ -250,19 +322,19 @@ if st.button("Submit"):
         st.warning("Please complete all required fields (and add comments if Broken Down).")
         st.stop()
 
-    # GSpread client (via Secrets)
+    # Sheets client & worksheet
     client = get_gspread_client()
     sheet = client.open("Web_App")
-    worksheet = sheet.worksheet("Tools")  # ensure the worksheet exists
+    worksheet = sheet.worksheet("Sheet1")  # Tools transactions sheet
 
-    # Current sheet as DF (may be empty)
+    # Current DF (safe if empty)
     try:
         df_existing = gsdf.get_as_dataframe(worksheet).dropna(how="all")
     except Exception:
         df_existing = pd.DataFrame()
 
     # Block checkout if last was Broken Down
-    if not df_existing.empty:
+    if not df_existing.empty and "Selected Equipment" in df_existing.columns and "Situation" in df_existing.columns:
         last_record = df_existing[df_existing["Selected Equipment"] == st.session_state.equipment_input].tail(1)
         if (
             not last_record.empty
@@ -283,28 +355,22 @@ if st.button("Submit"):
             "Employee Name": [employee_name],
             "Equipment": [equipment],
             "Selected Equipment": [st.session_state.equipment_input],
-            "Transaction Type": [transaction_type],
+            "Transaction": [transaction_type],
             "Situation": [situation],
             "Comments": [comments],
         }
     )
 
-    # Append headers if sheet is empty; otherwise append rows
+    # Append headers if sheet empty; else append rows
     try:
-        first_row = worksheet.row_values(1)
+        has_header = bool(worksheet.row_values(1))
     except Exception:
-        first_row = []
+        has_header = False
 
-    if not first_row:
+    if not has_header:
         worksheet.append_rows([new_record.columns.tolist()] + new_record.values.tolist())
     else:
         worksheet.append_rows(new_record.values.tolist())
-
-    # Refresh DF to compute last transactions per equipment
-    try:
-        df_all = gsdf.get_as_dataframe(worksheet).dropna(how="all")
-    except Exception:
-        df_all = new_record.copy()
 
     # Email alert if Broken Down
     if new_record.iloc[0]["Situation"] == "Broken Down":
@@ -315,14 +381,21 @@ if st.button("Submit"):
         sig = st.session_state.get("signature_path")
         send_email(to=to_addr, subject=subject, message=msg, image_file=pic, image_file_2=sig)
 
-    # Last transaction per equipment
-    last_transaction_df = (
-        df_all.sort_values("DateTime")
-             .groupby("Selected Equipment", as_index=False)
-             .tail(1)  # keep last per equipment
-             .reset_index(drop=True)
-    )
-    st.write(last_transaction_df)
+    # Show last transactions table
+    try:
+        df_all = gsdf.get_as_dataframe(worksheet).dropna(how="all")
+    except Exception:
+        df_all = new_record.copy()
+
+    if not df_all.empty and {"Selected Equipment", "DateTime"}.issubset(df_all.columns):
+        last_transaction_df = (
+            df_all.sort_values("DateTime")
+                 .groupby("Selected Equipment", as_index=False)
+                 .tail(1)
+                 .reset_index(drop=True)
+        )
+        st.subheader("Last transaction per equipment")
+        st.dataframe(last_transaction_df, use_container_width=True)
 
     st.success("Form submitted successfully!")
     st.button("Submit Another Form", on_click=reset_form)
