@@ -1,6 +1,5 @@
 import pandas as pd
 import plotly.graph_objs as go
-import plotly.express as px
 import streamlit as st
 
 import gspread
@@ -13,7 +12,6 @@ SCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
-
 def get_gspread_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(
         st.secrets["gcp_service_account"], scopes=SCOPE
@@ -25,17 +23,17 @@ def get_gspread_client():
 # =========================
 def dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Strip spaces from column headers and make duplicates unique with _2, _3, ...
-    Also drop all-empty rows/cols.
+    Strip spaces in headers, make duplicates unique with _2, _3, ...
+    Drop fully empty rows/cols.
     """
     if df.empty:
         return df
-    clean = [str(c).strip() for c in df.columns]
-    counts = {}
+    base = [str(c).strip() for c in df.columns]
+    seen = {}
     new_cols = []
-    for c in clean:
-        counts[c] = counts.get(c, 0) + 1
-        new_cols.append(c if counts[c] == 1 else f"{c}_{counts[c]}")
+    for c in base:
+        seen[c] = seen.get(c, 0) + 1
+        new_cols.append(c if seen[c] == 1 else f"{c}_{seen[c]}")
     out = df.copy()
     out.columns = new_cols
     out = out.dropna(axis=1, how="all").dropna(axis=0, how="all")
@@ -47,8 +45,7 @@ def to_datetime_if_exists(df: pd.DataFrame, col: str) -> None:
 
 def table_values(df: pd.DataFrame):
     """
-    Convert a DataFrame to a list-of-lists suitable for Plotly Table cells,
-    pretty-printing datetimes.
+    For Plotly Table: list-of-lists (columns), pretty-print datetimes.
     """
     vals = []
     for col in df.columns:
@@ -64,102 +61,108 @@ def table_values(df: pd.DataFrame):
 st.set_page_config(page_title="Tables Report", layout="wide")
 st.title("📚 Tables Report")
 
-# Connect and pull data
 client = get_gspread_client()
 sheet = client.open("Web_App")
 
-ws_dashboard = sheet.worksheet("Dashboard")
-ws_tools     = sheet.worksheet("Sheet1")
-ws_forklift  = sheet.worksheet("Forklift")
+ws_dashboard = sheet.worksheet("Dashboard")   # Forklift log (contains 'B' markers)
+ws_tools     = sheet.worksheet("Sheet1")      # Tools transactions (your columns)
+ws_forklift  = sheet.worksheet("Forklift")    # Not used below, but kept if you need later
 
-values_dash = ws_dashboard.get_all_values()
-values_tools = ws_tools.get_all_values()
-values_forklift = ws_forklift.get_all_values()
+# Pull values
+values_dash   = ws_dashboard.get_all_values()
+values_tools  = ws_tools.get_all_values()
+values_fork   = ws_forklift.get_all_values()
 
-# Build DataFrames and sanitize columns
-df  = pd.DataFrame(values_dash[1:],  columns=[c.strip() for c in values_dash[0]])
-df2 = pd.DataFrame(values_tools[1:], columns=[c.strip() for c in values_tools[0]])
-df3 = pd.DataFrame(values_forklift[1:], columns=[c.strip() for c in values_forklift[0]])
+# Build DataFrames + dedupe
+df_dash  = pd.DataFrame(values_dash[1:],  columns=[c.strip() for c in values_dash[0]])
+df_tools = pd.DataFrame(values_tools[1:], columns=[c.strip() for c in values_tools[0]])
+df_fork  = pd.DataFrame(values_fork[1:],  columns=[c.strip() for c in values_fork[0]])
 
-df  = dedupe_columns(df)
-df2 = dedupe_columns(df2)
-df3 = dedupe_columns(df3)
+df_dash  = dedupe_columns(df_dash)
+df_tools = dedupe_columns(df_tools)
+df_fork  = dedupe_columns(df_fork)
 
-# Parse dates if present
-to_datetime_if_exists(df, "Date")
-to_datetime_if_exists(df2, "Date")
-to_datetime_if_exists(df3, "Date")
+# Convert Date columns where present
+to_datetime_if_exists(df_dash,  "Date")
+to_datetime_if_exists(df_tools, "Date")
+to_datetime_if_exists(df_fork,  "Date")
 
-# =========================
-# ⚒️ Tools Inspection Last Transaction (from Sheet1)
-# =========================
+# =========================================================
+# ⚒️ Tools Inspection — Last Transactions (from Sheet1)
+# Columns you reported: Status, Date, User, Equipment, Equipment_Selected, Transaction, Status, Comments
+# After dedupe => Status, Date, User, Equipment, Equipment_Selected, Transaction, Status_2, Comments
+# We'll use Status_2 if it exists; else fallback to Status.
+# =========================================================
 st.subheader("⚒️ Tools Inspection — Last Transactions")
 
-# Filters
-status_opts = ["All", "Checked", "Broken Down"]
-txn_opts = ["All", "Check In", "Check Out"]
+status_col = "Status_2" if "Status_2" in df_tools.columns else ("Status" if "Status" in df_tools.columns else None)
+txn_col    = "Transaction" if "Transaction" in df_tools.columns else None
+date_col   = "Date" if "Date" in df_tools.columns else None
+
+# Sidebar filters
+status_opts = ["All"]
+if status_col:
+    status_opts += sorted([s for s in df_tools[status_col].dropna().unique().tolist() if s != ""])
+
+txn_opts = ["All"]
+if txn_col:
+    txn_opts += sorted([t for t in df_tools[txn_col].dropna().unique().tolist() if t != ""])
 
 status_filter = st.sidebar.selectbox("Filter by Status", status_opts, index=0, key="flt_status")
 transaction_filter = st.sidebar.selectbox("Filter by Transaction", txn_opts, index=0, key="flt_txn")
 sort_order_tools = st.sidebar.selectbox("Sort order (Tools)", ["Ascending", "Descending"], index=1)
 
-tools_df = df2.copy()
+tools_df = df_tools.copy()
 
-# Defensive: ensure expected columns exist
-missing_cols = [c for c in ["Status", "Transaction", "Date"] if c not in tools_df.columns]
-if missing_cols:
-    st.warning(f"`Sheet1` is missing expected columns: {', '.join(missing_cols)}. Showing raw table.")
-    st.dataframe(tools_df, use_container_width=True)
+# Apply filters if columns exist
+if status_col and status_filter != "All":
+    tools_df = tools_df[tools_df[status_col] == status_filter]
+if txn_col and transaction_filter != "All":
+    tools_df = tools_df[tools_df[txn_col] == transaction_filter]
+
+# Sort by Date if present
+if date_col:
+    tools_df = tools_df.sort_values(by=date_col, ascending=(sort_order_tools == "Ascending"))
+
+# Color rows red when "Broken Down" in status_col (if present)
+if status_col and status_col in tools_df.columns:
+    row_colors = ["red" if v == "Broken Down" else "white" for v in tools_df[status_col]]
+    font_colors = ["white" if v == "Broken Down" else "black" for v in tools_df[status_col]]
 else:
-    if status_filter != "All":
-        tools_df = tools_df[tools_df["Status"] == status_filter]
-    if transaction_filter != "All":
-        tools_df = tools_df[tools_df["Transaction"] == transaction_filter]
+    row_colors = ["white"] * len(tools_df)
+    font_colors = ["black"] * len(tools_df)
 
-    tools_df = tools_df.sort_values(by="Date", ascending=(sort_order_tools == "Ascending"))
-
-    # Build Plotly table with colored rows for Broken Down
-    # Create per-row color arrays matching the number of rows
-    if "Status" in tools_df.columns:
-        row_colors = ["red" if v == "Broken Down" else "white" for v in tools_df["Status"]]
-        font_colors = ["white" if v == "Broken Down" else "black" for v in tools_df["Status"]]
-    else:
-        row_colors = ["white"] * len(tools_df)
-        font_colors = ["black"] * len(tools_df)
-
-    # Plotly Table expects column-wise lists; for colors we can pass a single list and Plotly will broadcast per column
-    table_tools = go.Table(
-        header=dict(
-            values=list(tools_df.columns),
-            fill_color="grey",
-            font=dict(color="white", size=16),
-            align="left",
-        ),
-        cells=dict(
-            values=table_values(tools_df),
-            fill_color=[row_colors],   # broadcast to all columns
-            font=dict(color=[font_colors]),
-            align="left",
-        ),
-    )
-
-    fig_tools = go.Figure(data=[table_tools])
-    fig_tools.update_layout(height=420, title="⚒️ Tools — Last Transactions")
-    st.plotly_chart(fig_tools, use_container_width=True)
+table_tools = go.Table(
+    header=dict(
+        values=list(tools_df.columns),
+        fill_color="grey",
+        font=dict(color="white", size=16),
+        align="left",
+    ),
+    cells=dict(
+        values=table_values(tools_df),
+        fill_color=[row_colors],          # broadcast row colors to all columns
+        font=dict(color=[font_colors]),   # broadcast font colors to all columns
+        align="left",
+    ),
+)
+fig_tools = go.Figure(data=[table_tools])
+fig_tools.update_layout(height=420, title="⚒️ Tools — Last Transactions (Sheet1)")
+st.plotly_chart(fig_tools, use_container_width=True)
 
 st.markdown("---")
 
-# =========================
+# =========================================================
 # 🏎️ Forklift Breakdown Report (from Dashboard)
-# =========================
+# We detect rows where ANY cell contains 'B'
+# =========================================================
 st.subheader("🏎️ Forklift Breakdown Report")
 
 def filter_breakdowns(dfx: pd.DataFrame, sort_col=None, sort_order="asc"):
     if dfx.empty:
         return dfx
-    # Keep rows where ANY cell contains "B" (breakdown mark)
-    filt = dfx.apply(lambda row: any("B" in str(v) for v in row.values), axis=1)
-    out = dfx.loc[filt].copy()
+    mask = dfx.apply(lambda row: any("B" in str(v) for v in row.values), axis=1)
+    out = dfx.loc[mask].copy()
     if sort_col and sort_col in out.columns:
         out = out.sort_values(by=sort_col, ascending=(sort_order == "asc"))
     return out
@@ -167,16 +170,12 @@ def filter_breakdowns(dfx: pd.DataFrame, sort_col=None, sort_order="asc"):
 sort_col_forklift = st.sidebar.selectbox("Sort by (Forklift)", ["", "Date"], index=1)
 sort_order_forklift = st.sidebar.selectbox("Sort order (Forklift)", ["asc", "desc"], index=1)
 
-# Defensive: show duplicates if any (debug aid)
-# dupes = df.columns[df.columns.duplicated()].tolist()
-# st.write("Duplicate cols in Dashboard:", dupes)
-
-forklift_df = filter_breakdowns(df, sort_col=sort_col_forklift or None, sort_order=sort_order_forklift)
+forklift_df = filter_breakdowns(df_dash, sort_col=sort_col_forklift or None, sort_order=sort_order_forklift)
 
 if forklift_df.empty:
     st.info("No breakdown rows detected in `Dashboard` (looking for cells that contain 'B').")
 else:
-    table_forklift = go.Table(
+    table_f = go.Table(
         header=dict(
             values=list(forklift_df.columns),
             fill_color="grey",
@@ -190,6 +189,6 @@ else:
             align="left",
         ),
     )
-    fig_forklift = go.Figure(data=[table_forklift])
-    fig_forklift.update_layout(height=420, title="🏎️ Forklift Breakdown Report")
-    st.plotly_chart(fig_forklift, use_container_width=True)
+    fig_f = go.Figure(data=[table_f])
+    fig_f.update_layout(height=420, title="🏎️ Forklift Breakdown Report (Dashboard)")
+    st.plotly_chart(fig_f, use_container_width=True)
