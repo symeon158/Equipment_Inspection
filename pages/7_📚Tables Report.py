@@ -167,7 +167,7 @@ def filter_breakdowns(dfx: pd.DataFrame, sort_col=None, sort_order="asc"):
         out = out.sort_values(by=sort_col, ascending=(sort_order == "asc"))
     return out
 
-sort_col_forklift = st.sidebar.selectbox("Sort by (Forklift)", ["", "Date"], index=1)
+sort_col_forklift = st.sidebar.selectbox("Sort by (Forklift)", ["", "Date Time"], index=1)
 sort_order_forklift = st.sidebar.selectbox("Sort order (Forklift)", ["asc", "desc"], index=1)
 
 forklift_df = filter_breakdowns(df_dash, sort_col=sort_col_forklift or None, sort_order=sort_order_forklift)
@@ -192,4 +192,5 @@ else:
     fig_f = go.Figure(data=[table_f])
     fig_f.update_layout(height=420, title="🏎️ Forklift Breakdown Report (Dashboard)")
     st.plotly_chart(fig_f, use_container_width=True)
+
 
