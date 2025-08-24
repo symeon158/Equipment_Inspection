@@ -13,7 +13,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.mime_image import MIMEImage  # NOTE: keep as from email.mime.image import MIMEImage in your env
+from email.mime.image import MIMEImage
 
 # =========================
 # Page config
@@ -264,3 +264,4 @@ if st.session_state.get("can_reset", False):
         # don't mutate widget keys now; just set the flag and rerun
         st.session_state["_do_reset"] = True
         st.rerun()
+
