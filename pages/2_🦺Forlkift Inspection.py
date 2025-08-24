@@ -49,6 +49,7 @@ DEFAULTS = {
     "name1": "Please Select",       # employee
     "name2": "Please Select",       # forklift id
     "sign": False,
+    "can_reset": False,             # flag to show reset button after submit
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -155,8 +156,10 @@ def reset_form():
     # reset widget-bound keys
     st.session_state["name1"] = "Please Select"
     st.session_state["name2"] = "Please Select"
+    st.session_state["enable_camera"] = False
+    st.session_state["picture_path"] = None
+    st.session_state["signature_path"] = None
     # NOTE: no st.rerun() here
-
 
 
 # =========================
@@ -219,7 +222,7 @@ if st.button("Submit_Form"):
         "Operation": hours,
     }
     for i, field in enumerate(inspection_fields):
-        mark = f"{'X' if st.session_state.get(f'checked_{i}', False) else ''} {'B' if st.session_state.get(f'broken_{i}', False) else ''}".strip()
+        mark = f"{'X' if st.session_state.get(f"checked_{i}", False) else ''} {'B' if st.session_state.get(f"broken_{i}", False) else ''}".strip()
         data[field["name"]] = mark
         data[f"{field['name']} Comments"] = st.session_state.get(f"comment_{i}", "")
 
@@ -253,10 +256,13 @@ if st.button("Submit_Form"):
         )
 
     st.success("Form submitted successfully!")
-    
+    st.session_state["can_reset"] = True  # show reset button on next render
+
+# =========================
+# Reset button (outside submit block)
+# =========================
+if st.session_state.get("can_reset", False):
     if st.button("Submit Another Form"):
         reset_form()
+        st.session_state["can_reset"] = False
         st.rerun()
-
-
-
