@@ -254,8 +254,9 @@ if st.button("Submit_Form"):
 
     st.success("Form submitted successfully!")
     
-if st.button("Submit Another Form"):
-    reset_form()
-    st.rerun()
+    if st.button("Submit Another Form"):
+        reset_form()
+        st.rerun()
+
 
 
