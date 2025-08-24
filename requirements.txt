@@ -1,0 +1,13 @@
+streamlit
+pandas
+numpy
+Pillow
+gspread
+oauth2client
+gspread-dataframe
+plotly
+opencv-python
+pyzbar
+streamlit-webrtc
+streamlit-qrcode-scanner
+streamlit-drawable-canvas
