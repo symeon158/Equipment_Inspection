@@ -49,6 +49,7 @@ DEFAULTS = {
     "name1": "Please Select",       # employee
     "name2": "Please Select",       # forklift id
     "sign": False,
+    "force_email": False,           # new: force-send toggle
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -91,7 +92,6 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
                 img.add_header("Content-Disposition", "attachment", filename=fname)
                 msg.attach(img)
 
-    # Helper to surface clear errors
     def show_error(prefix, err):
         import smtplib as _s
         if isinstance(err, _s.SMTPAuthenticationError):
@@ -135,7 +135,6 @@ with st.expander("📧 Email diagnostics"):
     try:
         email_cfg = st.secrets["email"]
         user = email_cfg.get("user", "")
-        # mask user a bit
         if "@" in user:
             name, domain = user.split("@", 1)
             masked = (name[:2] + "***@" + domain) if len(name) > 2 else ("***@" + domain)
@@ -187,14 +186,23 @@ def signature():
         st.session_state.signature_path = sig_path
 
 
-def reset_form():
+def reset_form(full=True):
+    # reset fixed defaults
     for k, v in DEFAULTS.items():
         st.session_state[k] = v
-    # also clear dynamic inspection fields
-    for i in range(20):
-        st.session_state.pop(f"checked_{i}", None)
-        st.session_state.pop(f"broken_{i}", None)
-        st.session_state.pop(f"comment_{i}", None)
+    # clear dynamic inspection fields
+    for i in range(50):
+        st.session_state[f"checked_{i}"] = False
+        st.session_state[f"broken_{i}"] = False
+        st.session_state[f"comment_{i}"] = ""
+    # also reset the widget-bound keys explicitly
+    st.session_state["name1"] = "Please Select"
+    st.session_state["name2"] = "Please Select"
+    # force a rerun so UI actually clears
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
 
 
 # =========================
@@ -214,6 +222,9 @@ forklift_id = st.selectbox(
 hours = st.number_input("Operation Hours (float)", format="%.1f", step=0.1)
 st.write(f"The number you entered is: {hours:.1f}")
 
+# 🔔 Force email (for testing)
+st.checkbox("📧 Always send alert email (test)", key="force_email")
+
 # Inspection items
 inspection_fields = [
     {"name": "Brake Inspection", "checked": False, "broken": False, "comment": ""},
@@ -225,11 +236,10 @@ inspection_fields = [
 # Checklist UI
 for i, field in enumerate(inspection_fields):
     st.subheader(field["name"])
-    field["checked"] = st.checkbox("Checked", key=f"checked_{i}")
-    field["broken"]  = st.checkbox("Broken Down", key=f"broken_{i}")
-    comment_val = st.text_area("Comments", max_chars=120, height=60, key=f"comment_{i}")
-    field["comment"] = comment_val
-    if field["broken"] and not comment_val.strip():
+    st.checkbox("Checked", key=f"checked_{i}")
+    st.checkbox("Broken Down", key=f"broken_{i}")
+    st.text_area("Comments", max_chars=120, height=60, key=f"comment_{i}")
+    if st.session_state.get(f"broken_{i}", False) and not st.session_state.get(f"comment_{i}", "").strip():
         st.warning(f"Please provide comments for {field['name']} breakdown.")
 
 # Camera + Signature
@@ -237,12 +247,16 @@ take_picture()
 if st.checkbox("Signature", key="sign"):
     signature()
 
+# Helper: robust name check
+def _is_critical(name: str) -> bool:
+    return name.strip().lower() in {"brake inspection", "engine"}
+
 # Preview: will the alert fire?
 critical_broken_preview = any(
-    st.session_state.get(f"broken_{i}", False) and name in ["Brake Inspection", "Engine"]
-    for i, name in enumerate([f["name"] for f in inspection_fields])
+    st.session_state.get(f"broken_{i}", False) and _is_critical(inspection_fields[i]["name"])
+    for i in range(len(inspection_fields))
 )
-st.info(f"Will trigger alert on submit? **{critical_broken_preview}**")
+st.info(f"Will trigger alert on submit (without Force)? **{critical_broken_preview}**")
 
 
 # =========================
@@ -271,7 +285,7 @@ if st.button("📮 Send test email"):
 if st.button("Submit_Form"):
     # Validate required fields
     valid_rows = True
-    for i, field in enumerate(inspection_fields):
+    for i in range(len(inspection_fields)):
         checked = st.session_state.get(f"checked_{i}", False)
         broken  = st.session_state.get(f"broken_{i}", False)
         comment = st.session_state.get(f"comment_{i}", "").strip()
@@ -314,13 +328,14 @@ if st.button("Submit_Form"):
     else:
         ws.append_rows(df.values.tolist())
 
-    # Email alert if critical broken
-    critical_broken = any(
-        st.session_state.get(f"broken_{i}", False) and inspection_fields[i]["name"] in ["Brake Inspection", "Engine"]
+    # Email alert if critical broken OR force_email is checked
+    should_alert = st.session_state.get("force_email", False) or any(
+        st.session_state.get(f"broken_{i}", False) and _is_critical(inspection_fields[i]["name"])
         for i in range(len(inspection_fields))
     )
-    if critical_broken:
-        st.warning("Please stop the forklift and inform the supervisor!")
+    st.write(f"Alert condition at submit: **{should_alert}**")
+
+    if should_alert:
         to_addr = st.secrets["email"].get("to_alert", st.secrets["email"]["user"])
         subject = "Forklift Broken Down"
         message = f"Forklift {forklift_id} is broken down. Last record:\n{df.to_string(index=False)}"
@@ -334,4 +349,4 @@ if st.button("Submit_Form"):
         )
 
     st.success("Form submitted successfully!")
-    st.button("Submit Another Form", on_click=reset_form)
+    st.button("Submit Another Form", on_click=lambda: reset_form(full=True))
