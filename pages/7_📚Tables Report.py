@@ -1,144 +1,133 @@
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import gspread_dataframe as gsdf
 import pandas as pd
 import plotly.graph_objs as go
 import streamlit as st
 import plotly.express as px
 
-scope = ['https://www.googleapis.com/auth/spreadsheets',
-          "https://www.googleapis.com/auth/drive"]
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
- 
-credentials = ServiceAccountCredentials.from_json_keyfile_name("gs_credentials.json", scope)
-client = gspread.authorize(credentials)
+# =========================
+# Google Sheets via Secrets
+# =========================
+SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
 
-# specify the sheet and worksheet
-sheet = client.open('Web_App')
-#worksheet = sheet.add_worksheet(title="Dashboard", rows=1000, cols=13)
-worksheet = sheet.worksheet('Dashboard')
-worksheet2 = sheet.worksheet('Sheet1')
-worksheet3 = sheet.worksheet('Forklift')
-# get the values in the worksheet as a list of lists
-values = worksheet.get_all_values()
-values2 = worksheet2.get_all_values()
-values3 = worksheet3.get_all_values()
-# create a Pandas DataFrame from the values
-df = pd.DataFrame(values[1:], columns=values[0]).apply(pd.to_numeric, errors='ignore')
-df2 = pd.DataFrame(values2[1:], columns=values2[0]).apply(pd.to_numeric, errors='ignore')
-df3 = pd.DataFrame(values3[1:], columns=values3[0]).apply(pd.to_numeric, errors='ignore')
-# drop rows and columns with all NaN values
-df.dropna(axis=0, how='all', inplace=True)
-df.dropna(axis=1, how='all', inplace=True)
-df2.dropna(axis=0, how='all', inplace=True)
-df2.dropna(axis=1, how='all', inplace=True)
-df3.dropna(axis=0, how='all', inplace=True)
-#df3.dropna(axis=1, how='all', inplace=True)
+def get_gspread_client():
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(
+        st.secrets["gcp_service_account"], scopes=SCOPE
+    )
+    return gspread.authorize(creds)
 
-st.title("📚Tables Report")
-# Define the trace for the table
-# Convert Date column to datetime
+# =========================
+# Load Data
+# =========================
+st.set_page_config(page_title="Tables Report", layout="wide")
+st.title("📚 Tables Report")
 
-import streamlit as st
-import plotly.graph_objs as go
+client = get_gspread_client()
+sheet = client.open("Web_App")
 
-# Load the data
+ws_dashboard = sheet.worksheet("Dashboard")
+ws_tools = sheet.worksheet("Sheet1")
+ws_forklift = sheet.worksheet("Forklift")
 
+# Pull values
+values_dash = ws_dashboard.get_all_values()
+values_tools = ws_tools.get_all_values()
+values_forklift = ws_forklift.get_all_values()
 
-# Convert date column to datetime
-df2['Date'] = pd.to_datetime(df2['Date'])
+# DataFrames
+df = pd.DataFrame(values_dash[1:], columns=values_dash[0])
+df2 = pd.DataFrame(values_tools[1:], columns=values_tools[0])
+df3 = pd.DataFrame(values_forklift[1:], columns=values_forklift[0])
 
-# Get user-selected filters and sorting options
-status_filter = st.sidebar.selectbox('Filter by Status', ['All', 'Checked', 'Broken Down'])
-transaction_filter = st.sidebar.selectbox('Filter by Transaction', ['All', 'Check In', 'Check Out'])
-sort_col = 'Date'
-sort_order = st.sidebar.selectbox('Sort order', ['Ascending', 'Descending'])
+# Drop empties
+df = df.dropna(how="all")
+df2 = df2.dropna(how="all")
+df3 = df3.dropna(how="all")
 
-# Filter data based on user-selected filters
-if status_filter == 'All' and transaction_filter == 'All':
-    filtered_df = df2
-elif status_filter == 'All':
-    filtered_df = df2[df2['Transaction'] == transaction_filter]
-elif transaction_filter == 'All':
-    filtered_df = df2[df2['Status'] == status_filter]
+# Convert types
+for col in ["Date"]:
+    if col in df.columns:
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+    if col in df2.columns:
+        df2[col] = pd.to_datetime(df2[col], errors="coerce")
+    if col in df3.columns:
+        df3[col] = pd.to_datetime(df3[col], errors="coerce")
+
+# ================
+# Tools Inspection Report (last transactions)
+# ================
+st.subheader("⚒️ Tools Inspection Last Transaction")
+
+status_filter = st.sidebar.selectbox("Filter by Status", ["All", "Checked", "Broken Down"])
+transaction_filter = st.sidebar.selectbox("Filter by Transaction", ["All", "Check In", "Check Out"])
+sort_order_tools = st.sidebar.selectbox("Sort order (Tools)", ["Ascending", "Descending"])
+
+df_tools_filtered = df2.copy()
+
+if status_filter != "All":
+    df_tools_filtered = df_tools_filtered[df_tools_filtered["Status"] == status_filter]
+if transaction_filter != "All":
+    df_tools_filtered = df_tools_filtered[df_tools_filtered["Transaction"] == transaction_filter]
+
+if sort_order_tools == "Ascending":
+    df_tools_filtered = df_tools_filtered.sort_values(by="Date", ascending=True)
 else:
-    filtered_df = df2[(df2['Status'] == status_filter) & (df2['Transaction'] == transaction_filter)]
+    df_tools_filtered = df_tools_filtered.sort_values(by="Date", ascending=False)
 
-# Sort data based on user-selected sorting option
-if sort_order == 'Ascending':
-    filtered_df = filtered_df.sort_values(by=sort_col, ascending=True)
-else:
-    filtered_df = filtered_df.sort_values(by=sort_col, ascending=False)
-
-# Create the Plotly table
-table = go.Table(
-    header=dict(values=list(filtered_df.columns),
-                fill_color='grey',
-                font=dict(color='white',size=18),
-                align='left'),
-    cells=dict(values=[filtered_df[col] for col in filtered_df.columns],
-               fill_color=[[ 'white' if val != 'Broken Down' else 'red' for val in filtered_df['Status'] ]],
-               font=dict(color=[['white' if val == 'Broken Down' else 'Black' for val in filtered_df['Status'] ]]),
-               align='left')
+# Create table
+table_tools = go.Table(
+    header=dict(
+        values=list(df_tools_filtered.columns),
+        fill_color="grey",
+        font=dict(color="white", size=16),
+        align="left"
+    ),
+    cells=dict(
+        values=[df_tools_filtered[col] for col in df_tools_filtered.columns],
+        fill_color=[["red" if v == "Broken Down" else "white" for v in df_tools_filtered["Status"]]],
+        font=dict(color=[["white" if v == "Broken Down" else "black" for v in df_tools_filtered["Status"]]]),
+        align="left"
+    )
 )
+fig_tools = go.Figure(data=[table_tools])
+fig_tools.update_layout(height=400, title="⚒️ Tools Inspection Last Transaction")
+st.plotly_chart(fig_tools, use_container_width=True)
 
-# Create a figure and add table trace
-fig = go.Figure(data=table)
+# ================
+# Forklift Breakdown Report
+# ================
+st.subheader("🏎️ Forklift Breakdown Report")
 
-# Update table layout
-fig.update_layout(
-    title='⚒️Tools Inspection Last Transaction',
-    height=400,
-    autosize=True
+def filter_breakdowns(df, sort_col=None, sort_order="asc"):
+    # Keep rows where any value contains "B" (breakdown marker)
+    filtered = df[df.apply(lambda row: any("B" in str(v) for v in row.values), axis=1)]
+    if sort_col and sort_col in filtered.columns:
+        filtered = filtered.sort_values(by=sort_col, ascending=(sort_order == "asc"))
+    return filtered
+
+sort_col_forklift = st.sidebar.selectbox("Sort by (Forklift)", ["", "Date"])
+sort_order_forklift = st.sidebar.selectbox("Sort order (Forklift)", ["asc", "desc"])
+
+df_breakdowns = filter_breakdowns(df, sort_col=sort_col_forklift, sort_order=sort_order_forklift)
+
+table_forklift = go.Table(
+    header=dict(
+        values=list(df_breakdowns.columns),
+        fill_color="grey",
+        font=dict(color="white", size=14),
+        align="left"
+    ),
+    cells=dict(
+        values=[df_breakdowns[col] for col in df_breakdowns.columns],
+        fill_color="white",
+        font=dict(color="black", size=12),
+        align="left"
+    )
 )
-
-# Display table
-st.plotly_chart(fig)
-
-
-
-# Load the data
-
-df['Date'] = pd.to_datetime(df['Date'])
-
-def filter_data(df, sort_col=None, sort_order='asc'):
-    filtered_df = df[df.apply(lambda x: 'B' in x.values, axis=1)]
-    if sort_col:
-        filtered_df = filtered_df.sort_values(by=sort_col, ascending=(sort_order=='asc'))
-    return filtered_df
-
-# Get the user-selected sort column and order (if any)
-sort_col = st.sidebar.selectbox('Sort by', ['', 'Date'])
-sort_order = st.sidebar.selectbox('Sort order', ['asc', 'desc'])
-
-# Filter and sort the data
-filtered_df = filter_data(df, sort_col=sort_col, sort_order=sort_order)
-
-# Create the Plotly table
-fig = go.Figure(data=[go.Table(
-    header=dict(values=list(filtered_df.columns),
-                fill_color='grey',
-                font=dict(color='white',size=14),
-                align='left'),
-    cells=dict(values=[filtered_df[col] for col in filtered_df.columns],
-               fill_color='white',
-               font=dict(color='Black',size=12),
-               align='left'))
-])
-
-# Customize the table
-fig.update_layout(
-    title='🏎️Forklift Breakdown Report',
-    height=400,
-    autosize=True
-)
-
-# Display the table on Streamlit
-st.plotly_chart(fig)
-
-
-
-# Load the data into a Pandas DataFrame
-
-
-
+fig_forklift = go.Figure(data=[table_forklift])
+fig_forklift.update_layout(height=400, title="🏎️ Forklift Breakdown Report")
+st.plotly_chart(fig_forklift, use_container_width=True)
