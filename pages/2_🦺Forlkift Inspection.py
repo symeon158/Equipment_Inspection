@@ -13,7 +13,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
+from email.mime.image import MIMEImage   # ✅ correct import
 
 # =========================
 # Page config
@@ -21,7 +21,6 @@ from email.mime.image import MIMEImage
 st.set_page_config(page_title="Forklift Daily Inspection", layout="centered")
 st.title("🦺 Forklift Daily Inspection")
 
-# Optional banner image
 if os.path.exists("forklift.jpg"):
     st.image(Image.open("forklift.jpg"))
 
@@ -29,7 +28,8 @@ if os.path.exists("forklift.jpg"):
 if st.button("Forklift Inspection Video"):
     video_url = "https://www.youtube.com/watch?v=BZ6RHAkR7PU"
     DEFAULT_WIDTH = 80
-    width_pct = st.sidebar.slider("Video width", min_value=40, max_value=100, value=DEFAULT_WIDTH, format="%d%%")
+    width_pct = st.sidebar.slider("Video width", min_value=40, max_value=100,
+                                   value=DEFAULT_WIDTH, format="%d%%")
     side = max((100 - width_pct) / 2, 0.01)
     _, container, _ = st.columns([side, width_pct, side])
     container.video(video_url)
@@ -44,46 +44,35 @@ DEFAULTS = {
     "enable_camera": False,
     "picture_path": None,
     "signature_path": None,
-    "name1": "Please Select",   # employee
-    "name2": "Please Select",   # forklift id
     "sign": False,
-    "can_reset": False,         # show "Submit Another Form" button
-    "_do_reset": False,         # internal flag to reset on next run
+    "can_reset": False,
+    "_do_reset": False,   # <-- internal reset flag
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 # =========================
-# Pre-widget reset (runs BEFORE any widgets are created)
+# Pre-widget reset
 # =========================
 if st.session_state.get("_do_reset", False):
-    # remove dynamic checklist keys
+    # wipe widget state before widgets are created
     for key in list(st.session_state.keys()):
         if key.startswith(("checked_", "broken_", "comment_")):
             st.session_state.pop(key, None)
-
-    # pop widget-bound keys so widgets re-initialize with default values
-    for k in ["name1", "name2", "sign"]:
+    for k in ["name1", "name2", "sign", "canvas_forklift"]:
         st.session_state.pop(k, None)
-
-    # clear media state
     st.session_state["enable_camera"] = False
     st.session_state["picture_path"] = None
     st.session_state["signature_path"] = None
-
-    # hide reset button after clearing
     st.session_state["can_reset"] = False
     st.session_state["_do_reset"] = False
-    # Note: no widgets have been instantiated yet, so this is safe.
 
 # =========================
 # Secrets-based clients
 # =========================
-SCOPE = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
+SCOPE = ["https://spreadsheets.google.com/feeds",
+         "https://www.googleapis.com/auth/drive"]
 
 def get_gspread_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(
@@ -92,7 +81,6 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 def send_email(to, subject, message, image_file=None, image_file_2=None):
-    """Send Gmail alert with attachments using App Passwords."""
     cfg = st.secrets["email"]
     from_address = cfg["user"]
     password = cfg["app_password"]
@@ -101,18 +89,19 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
 
     msg = MIMEMultipart()
     msg["From"] = from_address
-    msg["To"] = to if isinstance(to, str) else ", ".join(to)
+    msg["To"] = to
     msg["Subject"] = subject
     msg.attach(MIMEText(message, "plain"))
 
-    for path, fname in [(image_file, "Forklift_Damage.jpg"), (image_file_2, "signature.png")]:
+    for path, fname in [(image_file, "Forklift_Damage.jpg"),
+                        (image_file_2, "signature.png")]:
         if path and os.path.exists(path):
             with open(path, "rb") as f:
                 img = MIMEImage(f.read())
-                img.add_header("Content-Disposition", "attachment", filename=fname)
+                img.add_header("Content-Disposition", "attachment",
+                               filename=fname)
                 msg.attach(img)
 
-    # Try STARTTLS (587), fallback SSL (465)
     try:
         server = smtplib.SMTP(host, port_tls, timeout=20)
         server.starttls()
@@ -162,7 +151,7 @@ def signature():
         st.session_state.signature_path = sig_path
 
 # =========================
-# Form fields (widgets start here)
+# Form fields
 # =========================
 date = st.date_input("Date", datetime.date.today())
 employee_name = st.selectbox(
@@ -177,7 +166,6 @@ forklift_id = st.selectbox(
 )
 hours = st.number_input("Operation Hours (float)", format="%.1f", step=0.1)
 
-# Inspection items
 inspection_fields = [
     {"name": "Brake Inspection"},
     {"name": "Engine"},
@@ -201,17 +189,16 @@ if st.checkbox("Signature", key="sign"):
 # Submit
 # =========================
 if st.button("Submit_Form"):
-    # Validation
     valid = all(
         st.session_state.get(f"checked_{i}", False) or
-        (st.session_state.get(f"broken_{i}", False) and st.session_state.get(f"comment_{i}", "").strip())
+        (st.session_state.get(f"broken_{i}", False)
+         and st.session_state.get(f"comment_{i}", "").strip())
         for i in range(len(inspection_fields))
     )
     if not valid or employee_name == "Please Select" or forklift_id == "Please Select":
         st.warning("Please complete all required fields.")
         st.stop()
 
-    # Build row
     data = {
         "DateTime": date_string,
         "FormDate": date.isoformat(),
@@ -220,14 +207,14 @@ if st.button("Submit_Form"):
         "Operation": hours,
     }
     for i, field in enumerate(inspection_fields):
-        mark = f"{'X' if st.session_state.get(f'checked_{i}', False) else ''} {'B' if st.session_state.get(f'broken_{i}', False) else ''}".strip()
+        mark = f"{'X' if st.session_state.get(f'checked_{i}', False) else ''} " \
+               f"{'B' if st.session_state.get(f'broken_{i}', False) else ''}".strip()
         data[field["name"]] = mark
         data[f"{field['name']} Comments"] = st.session_state.get(f"comment_{i}", "")
 
     df = pd.DataFrame([data])
     st.write(df)
 
-    # Write to Google Sheet
     client = get_gspread_client()
     sheet = client.open("Web_App")
     ws = sheet.worksheet("Forklift")
@@ -236,9 +223,9 @@ if st.button("Submit_Form"):
     else:
         ws.append_rows(df.values.tolist())
 
-    # Alert email if critical broken
     critical_broken = any(
-        st.session_state.get(f"broken_{i}", False) and inspection_fields[i]["name"] in ["Brake Inspection", "Engine"]
+        st.session_state.get(f"broken_{i}", False)
+        and inspection_fields[i]["name"] in ["Brake Inspection", "Engine"]
         for i in range(len(inspection_fields))
     )
     if critical_broken:
@@ -254,14 +241,12 @@ if st.button("Submit_Form"):
         )
 
     st.success("Form submitted successfully!")
-    st.session_state["can_reset"] = True  # show reset button next render
+    st.session_state["can_reset"] = True
 
 # =========================
-# Reset button (outside submit block)
+# Reset button
 # =========================
 if st.session_state.get("can_reset", False):
     if st.button("Submit Another Form"):
-        # don't mutate widget keys now; just set the flag and rerun
         st.session_state["_do_reset"] = True
         st.rerun()
-
