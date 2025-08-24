@@ -22,11 +22,11 @@ from email.mime.image import MIMEImage
 st.set_page_config(page_title="Forklift Daily Inspection", layout="centered")
 st.title("🦺 Forklift Daily Inspection")
 
-# Banner image (optional)
+# Optional banner image
 if os.path.exists("forklift.jpg"):
     st.image(Image.open("forklift.jpg"))
 
-# --- YouTube video (RESTORED) ---
+# --- YouTube video ---
 if st.button("Forklift Inspection Video"):
     video_url = "https://www.youtube.com/watch?v=BZ6RHAkR7PU"
     DEFAULT_WIDTH = 80
@@ -69,8 +69,9 @@ def get_gspread_client():
     )
     return gspread.authorize(creds)
 
+
 def send_email(to, subject, message, image_file=None, image_file_2=None):
-    """Gmail SMTP with TLS (587) and SSL (465) fallback."""
+    """Gmail SMTP with TLS (587) and SSL (465) fallback + rich errors."""
     cfg = st.secrets["email"]
     from_address = cfg["user"]
     password = cfg["app_password"]
@@ -90,9 +91,19 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
                 img.add_header("Content-Disposition", "attachment", filename=fname)
                 msg.attach(img)
 
+    # Helper to surface clear errors
+    def show_error(prefix, err):
+        import smtplib as _s
+        if isinstance(err, _s.SMTPAuthenticationError):
+            detail = err.smtp_error.decode() if isinstance(err.smtp_error, bytes) else err.smtp_error
+            st.error(f"{prefix} Authentication error: {err.smtp_code} {detail}")
+            st.info("Check: [email].user matches From, 16-char App Password (no spaces), 2-Step Verification ON.")
+        else:
+            st.error(f"{prefix} {repr(err)}")
+
     # Try STARTTLS
     try:
-        server = smtplib.SMTP(host, port_tls)
+        server = smtplib.SMTP(host, port_tls, timeout=20)
         server.ehlo()
         server.starttls()
         server.ehlo()
@@ -100,19 +111,42 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
         server.sendmail(from_address, [to] if isinstance(to, str) else to, msg.as_string())
         server.quit()
         st.success("Alert email sent via TLS (587)!")
-        return
+        return True
     except Exception as e:
-        st.warning(f"TLS failed: {e}")
+        show_error("TLS failed:", e)
 
     # Fallback SSL 465
     try:
-        server = smtplib.SMTP_SSL(host, 465)
+        server = smtplib.SMTP_SSL(host, 465, timeout=20)
         server.login(from_address, password)
         server.sendmail(from_address, [to] if isinstance(to, str) else to, msg.as_string())
         server.quit()
         st.success("Alert email sent via SSL (465)!")
+        return True
     except Exception as e:
-        st.error(f"SSL failed: {e}")
+        show_error("SSL failed:", e)
+        return False
+
+
+# =========================
+# Email diagnostics
+# =========================
+with st.expander("📧 Email diagnostics"):
+    try:
+        email_cfg = st.secrets["email"]
+        user = email_cfg.get("user", "")
+        # mask user a bit
+        if "@" in user:
+            name, domain = user.split("@", 1)
+            masked = (name[:2] + "***@" + domain) if len(name) > 2 else ("***@" + domain)
+        else:
+            masked = user
+        st.write(f"From/User: `{masked}`")
+        st.write(f"SMTP host: `{email_cfg.get('smtp_host','smtp.gmail.com')}`")
+        st.write(f"SMTP port (TLS): `{email_cfg.get('smtp_port',587)}`")
+        st.caption("Tip: From must equal User; App Password must be 16 characters (no spaces).")
+    except Exception:
+        st.error("No `[email]` section in secrets or unreadable.")
 
 
 # =========================
@@ -134,6 +168,7 @@ def take_picture():
     if st.button("📷 Disable Camera"):
         st.session_state.enable_camera = False
 
+
 def signature():
     canvas = st_canvas(
         fill_color="rgba(255,165,0,0.3)",
@@ -151,6 +186,7 @@ def signature():
         img.save(sig_path)
         st.session_state.signature_path = sig_path
 
+
 def reset_form():
     for k, v in DEFAULTS.items():
         st.session_state[k] = v
@@ -165,12 +201,20 @@ def reset_form():
 # Form fields
 # =========================
 date = st.date_input("Date", datetime.date.today())
-employee_name = st.selectbox("Employee Name", ["Please Select", "Simeon Papadopoulos", "Alexandridis Christos"], key="name1")
-forklift_id   = st.selectbox("Number of Forklifts", ["Please Select", "ME 119135", "ME 125321"], key="name2")
+employee_name = st.selectbox(
+    "Employee Name",
+    ["Please Select", "Simeon Papadopoulos", "Alexandridis Christos"],
+    key="name1"
+)
+forklift_id = st.selectbox(
+    "Number of Forklifts",
+    ["Please Select", "ME 119135", "ME 125321"],
+    key="name2"
+)
 hours = st.number_input("Operation Hours (float)", format="%.1f", step=0.1)
 st.write(f"The number you entered is: {hours:.1f}")
 
-# Critical inspection fields
+# Inspection items
 inspection_fields = [
     {"name": "Brake Inspection", "checked": False, "broken": False, "comment": ""},
     {"name": "Engine",           "checked": False, "broken": False, "comment": ""},
@@ -178,7 +222,7 @@ inspection_fields = [
     {"name": "Tires",            "checked": False, "broken": False, "comment": ""},
 ]
 
-# Render inspection checklist
+# Checklist UI
 for i, field in enumerate(inspection_fields):
     st.subheader(field["name"])
     field["checked"] = st.checkbox("Checked", key=f"checked_{i}")
@@ -188,10 +232,37 @@ for i, field in enumerate(inspection_fields):
     if field["broken"] and not comment_val.strip():
         st.warning(f"Please provide comments for {field['name']} breakdown.")
 
-# Camera + signature
+# Camera + Signature
 take_picture()
 if st.checkbox("Signature", key="sign"):
     signature()
+
+# Preview: will the alert fire?
+critical_broken_preview = any(
+    st.session_state.get(f"broken_{i}", False) and name in ["Brake Inspection", "Engine"]
+    for i, name in enumerate([f["name"] for f in inspection_fields])
+)
+st.info(f"Will trigger alert on submit? **{critical_broken_preview}**")
+
+
+# =========================
+# Quick SMTP test (no attachments)
+# =========================
+st.markdown("#### Quick email test")
+test_to = st.text_input(
+    "Send test to (defaults to your From address)",
+    value=st.secrets.get("email", {}).get("user", "")
+)
+if st.button("📮 Send test email"):
+    ok = send_email(
+        to=test_to,
+        subject="Streamlit test email",
+        message="If you received this, SMTP auth works.",
+        image_file=None,
+        image_file_2=None,
+    )
+    if ok:
+        st.success("Test email triggered. Check your inbox/spam.")
 
 
 # =========================
