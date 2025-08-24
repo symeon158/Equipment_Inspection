@@ -256,4 +256,4 @@ if st.button("Submit_Form"):
     
     st.button("Submit Another Form", on_click=reset_form)
 
-   now does not clear anything
+
