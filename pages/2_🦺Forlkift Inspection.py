@@ -49,7 +49,6 @@ DEFAULTS = {
     "name1": "Please Select",       # employee
     "name2": "Please Select",       # forklift id
     "sign": False,
-    "force_email": False,           # new: force-send toggle
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -72,7 +71,7 @@ def get_gspread_client():
 
 
 def send_email(to, subject, message, image_file=None, image_file_2=None):
-    """Gmail SMTP with TLS (587) and SSL (465) fallback + rich errors."""
+    """Send Gmail alert with attachments using App Passwords."""
     cfg = st.secrets["email"]
     from_address = cfg["user"]
     password = cfg["app_password"]
@@ -92,60 +91,18 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
                 img.add_header("Content-Disposition", "attachment", filename=fname)
                 msg.attach(img)
 
-    def show_error(prefix, err):
-        import smtplib as _s
-        if isinstance(err, _s.SMTPAuthenticationError):
-            detail = err.smtp_error.decode() if isinstance(err.smtp_error, bytes) else err.smtp_error
-            st.error(f"{prefix} Authentication error: {err.smtp_code} {detail}")
-            st.info("Check: [email].user matches From, 16-char App Password (no spaces), 2-Step Verification ON.")
-        else:
-            st.error(f"{prefix} {repr(err)}")
-
-    # Try STARTTLS
+    # Try STARTTLS (587), fallback SSL (465)
     try:
         server = smtplib.SMTP(host, port_tls, timeout=20)
-        server.ehlo()
         server.starttls()
-        server.ehlo()
         server.login(from_address, password)
-        server.sendmail(from_address, [to] if isinstance(to, str) else to, msg.as_string())
+        server.sendmail(from_address, [to], msg.as_string())
         server.quit()
-        st.success("Alert email sent via TLS (587)!")
-        return True
-    except Exception as e:
-        show_error("TLS failed:", e)
-
-    # Fallback SSL 465
-    try:
+    except Exception:
         server = smtplib.SMTP_SSL(host, 465, timeout=20)
         server.login(from_address, password)
-        server.sendmail(from_address, [to] if isinstance(to, str) else to, msg.as_string())
+        server.sendmail(from_address, [to], msg.as_string())
         server.quit()
-        st.success("Alert email sent via SSL (465)!")
-        return True
-    except Exception as e:
-        show_error("SSL failed:", e)
-        return False
-
-
-# =========================
-# Email diagnostics
-# =========================
-with st.expander("📧 Email diagnostics"):
-    try:
-        email_cfg = st.secrets["email"]
-        user = email_cfg.get("user", "")
-        if "@" in user:
-            name, domain = user.split("@", 1)
-            masked = (name[:2] + "***@" + domain) if len(name) > 2 else ("***@" + domain)
-        else:
-            masked = user
-        st.write(f"From/User: `{masked}`")
-        st.write(f"SMTP host: `{email_cfg.get('smtp_host','smtp.gmail.com')}`")
-        st.write(f"SMTP port (TLS): `{email_cfg.get('smtp_port',587)}`")
-        st.caption("Tip: From must equal User; App Password must be 16 characters (no spaces).")
-    except Exception:
-        st.error("No `[email]` section in secrets or unreadable.")
 
 
 # =========================
@@ -186,23 +143,16 @@ def signature():
         st.session_state.signature_path = sig_path
 
 
-def reset_form(full=True):
-    # reset fixed defaults
+def reset_form():
     for k, v in DEFAULTS.items():
         st.session_state[k] = v
-    # clear dynamic inspection fields
     for i in range(50):
         st.session_state[f"checked_{i}"] = False
         st.session_state[f"broken_{i}"] = False
         st.session_state[f"comment_{i}"] = ""
-    # also reset the widget-bound keys explicitly
     st.session_state["name1"] = "Please Select"
     st.session_state["name2"] = "Please Select"
-    # force a rerun so UI actually clears
-    try:
-        st.rerun()
-    except Exception:
-        st.experimental_rerun()
+    st.rerun()
 
 
 # =========================
@@ -220,20 +170,15 @@ forklift_id = st.selectbox(
     key="name2"
 )
 hours = st.number_input("Operation Hours (float)", format="%.1f", step=0.1)
-st.write(f"The number you entered is: {hours:.1f}")
-
-# 🔔 Force email (for testing)
-st.checkbox("📧 Always send alert email (test)", key="force_email")
 
 # Inspection items
 inspection_fields = [
-    {"name": "Brake Inspection", "checked": False, "broken": False, "comment": ""},
-    {"name": "Engine",           "checked": False, "broken": False, "comment": ""},
-    {"name": "Lights",           "checked": False, "broken": False, "comment": ""},
-    {"name": "Tires",            "checked": False, "broken": False, "comment": ""},
+    {"name": "Brake Inspection"},
+    {"name": "Engine"},
+    {"name": "Lights"},
+    {"name": "Tires"},
 ]
 
-# Checklist UI
 for i, field in enumerate(inspection_fields):
     st.subheader(field["name"])
     st.checkbox("Checked", key=f"checked_{i}")
@@ -242,59 +187,23 @@ for i, field in enumerate(inspection_fields):
     if st.session_state.get(f"broken_{i}", False) and not st.session_state.get(f"comment_{i}", "").strip():
         st.warning(f"Please provide comments for {field['name']} breakdown.")
 
-# Camera + Signature
 take_picture()
 if st.checkbox("Signature", key="sign"):
     signature()
-
-# Helper: robust name check
-def _is_critical(name: str) -> bool:
-    return name.strip().lower() in {"brake inspection", "engine"}
-
-# Preview: will the alert fire?
-critical_broken_preview = any(
-    st.session_state.get(f"broken_{i}", False) and _is_critical(inspection_fields[i]["name"])
-    for i in range(len(inspection_fields))
-)
-st.info(f"Will trigger alert on submit (without Force)? **{critical_broken_preview}**")
-
-
-# =========================
-# Quick SMTP test (no attachments)
-# =========================
-st.markdown("#### Quick email test")
-test_to = st.text_input(
-    "Send test to (defaults to your From address)",
-    value=st.secrets.get("email", {}).get("user", "")
-)
-if st.button("📮 Send test email"):
-    ok = send_email(
-        to=test_to,
-        subject="Streamlit test email",
-        message="If you received this, SMTP auth works.",
-        image_file=None,
-        image_file_2=None,
-    )
-    if ok:
-        st.success("Test email triggered. Check your inbox/spam.")
 
 
 # =========================
 # Submit
 # =========================
 if st.button("Submit_Form"):
-    # Validate required fields
-    valid_rows = True
-    for i in range(len(inspection_fields)):
-        checked = st.session_state.get(f"checked_{i}", False)
-        broken  = st.session_state.get(f"broken_{i}", False)
-        comment = st.session_state.get(f"comment_{i}", "").strip()
-        if not (checked or (broken and comment)):
-            valid_rows = False
-            break
-
-    if not valid_rows or employee_name == "Please Select" or forklift_id == "Please Select":
-        st.warning("Please complete all required fields (each item must be Checked OR (Broken + Comment)).")
+    # Validation
+    valid = all(
+        st.session_state.get(f"checked_{i}", False) or
+        (st.session_state.get(f"broken_{i}", False) and st.session_state.get(f"comment_{i}", "").strip())
+        for i in range(len(inspection_fields))
+    )
+    if not valid or employee_name == "Please Select" or forklift_id == "Please Select":
+        st.warning("Please complete all required fields.")
         st.stop()
 
     # Build row
@@ -316,30 +225,21 @@ if st.button("Submit_Form"):
     # Write to Google Sheet
     client = get_gspread_client()
     sheet = client.open("Web_App")
-    ws = sheet.worksheet("Forklift")  # ensure this worksheet exists
-
-    try:
-        has_header = bool(ws.row_values(1))
-    except Exception:
-        has_header = False
-
-    if not has_header:
+    ws = sheet.worksheet("Forklift")
+    if not ws.row_values(1):
         ws.append_rows([df.columns.tolist()] + df.values.tolist())
     else:
         ws.append_rows(df.values.tolist())
 
-    # Email alert if critical broken OR force_email is checked
-    should_alert = st.session_state.get("force_email", False) or any(
-        st.session_state.get(f"broken_{i}", False) and _is_critical(inspection_fields[i]["name"])
+    # Alert email if critical broken
+    critical_broken = any(
+        st.session_state.get(f"broken_{i}", False) and inspection_fields[i]["name"] in ["Brake Inspection", "Engine"]
         for i in range(len(inspection_fields))
     )
-    st.write(f"Alert condition at submit: **{should_alert}**")
-
-    if should_alert:
+    if critical_broken:
         to_addr = st.secrets["email"].get("to_alert", st.secrets["email"]["user"])
         subject = "Forklift Broken Down"
         message = f"Forklift {forklift_id} is broken down. Last record:\n{df.to_string(index=False)}"
-
         send_email(
             to=to_addr,
             subject=subject,
@@ -349,4 +249,4 @@ if st.button("Submit_Form"):
         )
 
     st.success("Form submitted successfully!")
-    st.button("Submit Another Form", on_click=lambda: reset_form(full=True))
+    st.button("Submit Another Form", on_click=reset_form)
