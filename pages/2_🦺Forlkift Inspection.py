@@ -144,15 +144,19 @@ def signature():
 
 
 def reset_form():
+    # reset fixed defaults
     for k, v in DEFAULTS.items():
         st.session_state[k] = v
+    # clear dynamic inspection fields
     for i in range(50):
         st.session_state[f"checked_{i}"] = False
         st.session_state[f"broken_{i}"] = False
         st.session_state[f"comment_{i}"] = ""
+    # reset widget-bound keys
     st.session_state["name1"] = "Please Select"
     st.session_state["name2"] = "Please Select"
-    st.rerun()
+    # NOTE: no st.rerun() here
+
 
 
 # =========================
@@ -249,4 +253,9 @@ if st.button("Submit_Form"):
         )
 
     st.success("Form submitted successfully!")
-    st.button("Submit Another Form", on_click=reset_form)
+    
+if st.button("Submit Another Form"):
+    reset_form()
+    st.rerun()
+
+
