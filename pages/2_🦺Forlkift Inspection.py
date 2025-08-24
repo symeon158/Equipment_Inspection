@@ -21,8 +21,19 @@ from email.mime.image import MIMEImage
 # =========================
 st.set_page_config(page_title="Forklift Daily Inspection", layout="centered")
 st.title("🦺 Forklift Daily Inspection")
+
+# Banner image (optional)
 if os.path.exists("forklift.jpg"):
     st.image(Image.open("forklift.jpg"))
+
+# --- YouTube video (RESTORED) ---
+if st.button("Forklift Inspection Video"):
+    video_url = "https://www.youtube.com/watch?v=BZ6RHAkR7PU"
+    DEFAULT_WIDTH = 80
+    width_pct = st.sidebar.slider("Video width", min_value=40, max_value=100, value=DEFAULT_WIDTH, format="%d%%")
+    side = max((100 - width_pct) / 2, 0.01)
+    _, container, _ = st.columns([side, width_pct, side])
+    container.video(video_url)
 
 now = datetime.datetime.now()
 date_string = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -144,7 +155,7 @@ def reset_form():
     for k, v in DEFAULTS.items():
         st.session_state[k] = v
     # also clear dynamic inspection fields
-    for i in range(10):
+    for i in range(20):
         st.session_state.pop(f"checked_{i}", None)
         st.session_state.pop(f"broken_{i}", None)
         st.session_state.pop(f"comment_{i}", None)
@@ -172,7 +183,6 @@ for i, field in enumerate(inspection_fields):
     st.subheader(field["name"])
     field["checked"] = st.checkbox("Checked", key=f"checked_{i}")
     field["broken"]  = st.checkbox("Broken Down", key=f"broken_{i}")
-    # require comment if broken
     comment_val = st.text_area("Comments", max_chars=120, height=60, key=f"comment_{i}")
     field["comment"] = comment_val
     if field["broken"] and not comment_val.strip():
