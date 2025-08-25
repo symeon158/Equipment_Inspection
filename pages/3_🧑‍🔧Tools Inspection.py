@@ -51,97 +51,64 @@ def load_tools_df(ws) -> pd.DataFrame:
         ])
     df = pd.DataFrame(values[1:], columns=values[0])
 
-    # Normalize column names exactly as expected
+    # Ensure expected columns exist
     expected = ["DateTime","Date","User","Equipment","Equipment_Selected","Transaction","Status","Comments"]
     missing = [c for c in expected if c not in df.columns]
     if missing:
         st.error(f"Missing expected columns in Sheet1: {missing}")
         st.stop()
 
-    # Normalize string fields (trim spaces)
+    # Normalize fields
     for col in ["User","Equipment","Equipment_Selected","Transaction","Status","Comments"]:
         df[col] = df[col].astype(str).str.strip()
 
-    # Parse DateTime (use for latest); tolerate different formats
+    # Parse DateTime & Date
     df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce", infer_datetime_format=True)
-
-    # Parse Date if present
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
 
     return df
 
-# ---------- DEBUG: show last transaction per Equipment_Selected ----------
 
+# ---------- helpers for "last record" ----------
 def compute_last_by_equipment(df: pd.DataFrame) -> pd.DataFrame:
-    # Clean strings
-    for c in ["Equipment_Selected", "User", "Transaction", "Status", "Comments"]:
-        if c in df.columns:
-            df[c] = df[c].astype(str).str.strip()
-
-    # Keep an original row order to break ties
     df = df.copy()
     df["_row"] = range(len(df))
-
-    # Parse DateTime (robust)
-    if "DateTime" in df.columns:
-        df["_dt"] = pd.to_datetime(df["DateTime"], errors="coerce", infer_datetime_format=True)
-    else:
-        # If the column is missing (shouldn't be), create a NaT column
-        df["_dt"] = pd.NaT
-
-    # Normalized equipment key
+    df["_dt"] = pd.to_datetime(df["DateTime"], errors="coerce", infer_datetime_format=True)
     df["_equip"] = df["Equipment_Selected"].astype(str).str.strip()
-
-    # Sort by equipment, then parsed datetime, then original order
     df_sorted = df.sort_values(["_equip", "_dt", "_row"], ascending=[True, True, True])
-
-    # Take the last row per equipment
-    last_by_equipment = df_sorted.dropna(subset=["_equip"]).drop_duplicates(subset=["_equip"], keep="last")
-
+    last_by_equipment = (
+        df_sorted
+        .dropna(subset=["_equip"])
+        .drop_duplicates(subset=["_equip"], keep="last")
+    )
     return last_by_equipment
 
+def latest_row_for_equipment(df: pd.DataFrame, equip_selected: str) -> pd.Series | None:
+    if not equip_selected:
+        return None
+    equip_selected = str(equip_selected).strip()
+    df_sel = df[df["Equipment_Selected"].astype(str).str.strip() == equip_selected]
+    if df_sel.empty:
+        return None
+    df_valid = df_sel[df_sel["DateTime"].notna()]
+    if not df_valid.empty:
+        return df_valid.sort_values("DateTime").iloc[-1]
+    return df_sel.iloc[-1]
+
+
+# =========================
+# Load Google Sheet NOW (so df exists)
+# =========================
+client = get_gspread_client()
+sheet = client.open("Web_App")
+ws_tools = sheet.worksheet("Sheet1")  # your worksheet
+df = load_tools_df(ws_tools)
+
+# ---------- DEBUG TABLE: last transaction per Equipment_Selected ----------
 last_by_equipment = compute_last_by_equipment(df)
-
 st.subheader("🔎 Last transaction per Equipment_Selected")
-cols_display = [c for c in [
-    "Equipment_Selected", "DateTime", "User", "Transaction", "Status", "Comments"
-] if c in last_by_equipment.columns]
+cols_display = [c for c in ["Equipment_Selected","DateTime","User","Transaction","Status","Comments"] if c in last_by_equipment.columns]
 st.dataframe(last_by_equipment[cols_display].reset_index(drop=True))
-
-
-def send_email(to, subject, message, image_file=None, image_file_2=None):
-    cfg = st.secrets.get("email", {})
-    from_address = cfg.get("user")
-    password = cfg.get("app_password")
-    if not (from_address and password and to):
-        return
-    host = cfg.get("smtp_host", "smtp.gmail.com")
-    port_tls = int(cfg.get("smtp_port", 587))
-
-    msg = MIMEMultipart()
-    msg["From"] = from_address
-    msg["To"] = to
-    msg["Subject"] = subject
-    msg.attach(MIMEText(message, "plain"))
-
-    for path, fname in [(image_file, "picture.jpg"), (image_file_2, "signature.png")]:
-        if path and os.path.exists(path):
-            with open(path, "rb") as f:
-                img = MIMEImage(f.read())
-                img.add_header("Content-Disposition", "attachment", filename=fname)
-                msg.attach(img)
-
-    try:
-        server = smtplib.SMTP(host, port_tls, timeout=20)
-        server.starttls()
-        server.login(from_address, password)
-        server.sendmail(from_address, [to], msg.as_string())
-        server.quit()
-    except Exception:
-        server = smtplib.SMTP_SSL(host, 465, timeout=20)
-        server.login(from_address, password)
-        server.sendmail(from_address, [to], msg.as_string())
-        server.quit()
 
 
 # =========================
@@ -156,27 +123,6 @@ equipments = [
 employee_names = ["Please Select", "Alexandridis Christos", "Ntamaris Nikolaos", "Papadopoulos Symeon"]
 transactions = ["Check In", "Check Out"]
 statuses = ["Checked", "Broken Down"]
-
-
-# =========================
-# Helpers
-# =========================
-def latest_row_for_equipment(df: pd.DataFrame, equip_selected: str) -> pd.Series | None:
-    """Get latest row by DateTime for a given Equipment_Selected; if all DateTime NaT, use last physical row."""
-    if not equip_selected:
-        return None
-    equip_selected = str(equip_selected).strip()
-    df_sel = df[df["Equipment_Selected"].astype(str).str.strip() == equip_selected]
-    if df_sel.empty:
-        return None
-
-    # Prefer rows with valid DateTime
-    df_valid = df_sel[df_sel["DateTime"].notna()]
-    if not df_valid.empty:
-        return df_valid.sort_values("DateTime").iloc[-1]
-
-    # Fallback: use last physical row entered
-    return df_sel.iloc[-1]
 
 
 # =========================
@@ -206,20 +152,15 @@ with st.form("tools_form", clear_on_submit=True):
         key="canvas_tools",
     )
 
-    # --- SAFETY VALVE LOOKUP (reads Web_App -> Sheet1) ---
-    client = get_gspread_client()
-    sheet = client.open("Web_App")
-    ws_tools = sheet.worksheet("Sheet1")  # <-- your worksheet
-    df = load_tools_df(ws_tools)
-
+    # --- SAFETY VALVE: use latest row (by DateTime) ---
     last = latest_row_for_equipment(df, selected_equipment)
     is_blocked = False
     blocked_reason = ""
-    
+
     if selected_equipment and last is not None:
         last_status = str(last["Status"]).strip().lower() if "Status" in last else None
         last_dt_display = str(last["DateTime"]) if "DateTime" in last else "unknown time"
-    
+
         if last_status == "broken down" and transaction == "Check Out":
             is_blocked = True
             blocked_reason = (
@@ -229,7 +170,6 @@ with st.form("tools_form", clear_on_submit=True):
                 "✅ Please choose **another equipment**, or **after repair**, "
                 "submit a **Check In** for this item with **Status = Checked** to mark it fixed."
             )
-
 
     # Last transaction preview
     if last is not None:
@@ -260,18 +200,18 @@ if submitted:
         st.warning("Please provide comments for the breakdown.")
         st.stop()
 
-    # Re-check safety at submit time
+    # Re-check safety using a fresh df (race-condition safe)
     df = load_tools_df(ws_tools)
     last = latest_row_for_equipment(df, selected_equipment)
-    last_status = (str(last["Status"]).strip() if last is not None and "Status" in last else None)
-    if last_status and last_status.lower() == "broken down" and transaction == "Check Out":
+    last_status = (str(last["Status"]).strip().lower() if last is not None and "Status" in last else None)
+    if last_status == "broken down" and transaction == "Check Out":
         st.error(
             f"Safety Valve: **{selected_equipment}** cannot be **Checked Out** because the last status is **Broken Down**.\n\n"
             "Please choose another item or, after repair, **Check In** this equipment with **Status = Checked**."
         )
         st.stop()
 
-    # Save media to /tmp now
+    # Save media
     picture_path = None
     if picture is not None:
         picture_path = "/tmp/picture.jpg"
@@ -286,8 +226,8 @@ if submitted:
 
     # Build record EXACTLY as your schema
     record = {
-        "DateTime": date_string,           # full timestamp
-        "Date": date.isoformat(),          # date only
+        "DateTime": date_string,
+        "Date": date.isoformat(),
         "User": user,
         "Equipment": equipment,
         "Equipment_Selected": selected_equipment,
@@ -303,17 +243,17 @@ if submitted:
     else:
         ws_tools.append_rows(out_df.values.tolist())
 
-    # Optional email when a broken item is recorded
+    # Optional email when Broken Down
     if status == "Broken Down":
-        to_addr = st.secrets.get("email", {}).get("to_alert", st.secrets.get("email", {}).get("user"))
+        cfg = st.secrets.get("email", {})
+        to_addr = cfg.get("to_alert", cfg.get("user"))
         if to_addr:
             subject = f"Equipment Broken Down: {selected_equipment}"
             message = (
                 f"Equipment {selected_equipment} reported Broken Down by {user}.\n\n"
                 f"Record:\n{out_df.to_string(index=False)}"
             )
-            send_email(to=to_addr, subject=subject, message=message, image_file=picture_path, image_file_2=signature_path)
+            send_email(to=to_addr, subject=subject, message=message,
+                       image_file=picture_path, image_file_2=signature_path)
 
     st.success("Form submitted successfully! (Form has been cleared.)")
-
-
