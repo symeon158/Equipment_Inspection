@@ -8,9 +8,8 @@ from streamlit_drawable_canvas import st_canvas
 # Google Sheets
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import gspread_dataframe as gsdf
 
-# Email (optional alert when broken items submitted)
+# Email (optional)
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -48,42 +47,30 @@ def get_gspread_client():
 def load_tools_df(ws) -> pd.DataFrame:
     values = ws.get_all_values()
     if not values:
-        return pd.DataFrame()
-    # strip headers; dedupe duplicates (Status, etc.)
-    headers = [str(c).strip() for c in values[0]]
-    seen = {}
-    new_cols = []
-    for h in headers:
-        seen[h] = seen.get(h, 0) + 1
-        new_cols.append(h if seen[h] == 1 else f"{h}_{seen[h]}")
-    df = pd.DataFrame(values[1:], columns=new_cols).replace({"": pd.NA}).dropna(how="all")
-    # normalize expected cols (handle both "Selected Equipment" vs "Equipment_Selected")
-    # we’ll create a consistent alias column: Selected_Equipment
-    if "Selected Equipment" in df.columns:
-        df["Selected_Equipment"] = df["Selected Equipment"]
-    elif "Equipment_Selected" in df.columns:
-        df["Selected_Equipment"] = df["Equipment_Selected"]
-    else:
-        # fall back to Equipment if needed
-        df["Selected_Equipment"] = df.get("Equipment", pd.Series([pd.NA]*len(df)))
-    # cast Date if present
+        return pd.DataFrame(columns=[
+            "DateTime","Date","User","Equipment","Equipment_Selected","Transaction","Status","Comments"
+        ])
+    df = pd.DataFrame(values[1:], columns=values[0])
+    # normalize types
+    if "DateTime" in df.columns:
+        df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")  # <-- use for latest
     if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
     return df
 
 def send_email(to, subject, message, image_file=None, image_file_2=None):
-    """Optional: notify when a broken item is checked in."""
+    """Optional: email on 'Broken Down' records (requires [email] secrets)."""
     cfg = st.secrets.get("email", {})
     from_address = cfg.get("user")
     password = cfg.get("app_password")
-    if not (from_address and password):
-        return  # silently skip if email not configured
+    if not (from_address and password and to):
+        return
     host = cfg.get("smtp_host", "smtp.gmail.com")
     port_tls = int(cfg.get("smtp_port", 587))
 
     msg = MIMEMultipart()
     msg["From"] = from_address
-    msg["To"] = to if isinstance(to, str) else ", ".join(to)
+    msg["To"] = to
     msg["Subject"] = subject
     msg.attach(MIMEText(message, "plain"))
 
@@ -118,7 +105,7 @@ equipments = [
 ]
 employee_names = ["Please Select", "Alexandridis Christos", "Ntamaris Nikolaos", "Papadopoulos Symeon"]
 transactions = ["Check In", "Check Out"]
-situations = ["Checked", "Broken Down"]
+statuses = ["Checked", "Broken Down"]
 
 
 # =========================
@@ -126,15 +113,14 @@ situations = ["Checked", "Broken Down"]
 # =========================
 with st.form("tools_form", clear_on_submit=True):
     date = st.date_input("Date", datetime.date.today())
-    employee_name = st.selectbox("Employee Name", employee_names, index=0)
+    user = st.selectbox("User", employee_names, index=0)
 
     c1, c2 = st.columns([1, 2])
     equipment = c1.selectbox("Equipment", equipments, index=0)
-    # selection typed/QR result goes here (keep simple text input)
-    selected_equipment = c2.text_input("Selected Equipment (or scan result)", value=equipment or "")
+    selected_equipment = c2.text_input("Equipment_Selected (or scan result)", value=equipment or "")
 
-    transaction_type = st.selectbox("Transaction Type", ["Please Select"] + transactions, index=0)
-    situation = st.selectbox("Situation", ["Please Select"] + situations, index=0)
+    transaction = st.selectbox("Transaction", ["Please Select"] + transactions, index=0)
+    status = st.selectbox("Status", ["Please Select"] + statuses, index=0)
     comments = st.text_area("Comments (required if Broken Down)", max_chars=120, height=60)
 
     # Optional media
@@ -149,61 +135,47 @@ with st.form("tools_form", clear_on_submit=True):
         key="canvas_tools",
     )
 
-    # --- SAFETY VALVE LOOKUP ---
-    # We check the last record for the selected_equipment
+    # --- SAFETY VALVE LOOKUP (uses DateTime to find latest) ---
     client = get_gspread_client()
     sheet = client.open("Web_App")
-    ws_tools = sheet.worksheet("Tools")  # make sure this exists
+    ws_tools = sheet.worksheet("Tools")  # ensure this exists
     df = load_tools_df(ws_tools)
 
     last_record = pd.DataFrame()
     is_blocked = False
     blocked_reason = ""
+
     if selected_equipment:
-        last_record = df[df["Selected_Equipment"] == selected_equipment].sort_values(
-            by="Date", ascending=True, na_position="last"
-        ).tail(1)
+        # latest transaction by DateTime
+        last_record = (
+            df[df["Equipment_Selected"] == selected_equipment]
+            .sort_values(by="DateTime", ascending=True, na_position="last")
+            .tail(1)
+        )
 
-        # Determine last status
         last_status = None
-        if not last_record.empty:
-            # tolerate both "Situation" & "Status" headers
-            if "Situation" in last_record.columns:
-                last_status = str(last_record.iloc[0]["Situation"]).strip()
-            elif "Status" in last_record.columns:
-                last_status = str(last_record.iloc[0]["Status"]).strip()
-            elif "Status_2" in last_record.columns:
-                last_status = str(last_record.iloc[0]["Status_2"]).strip()
+        if not last_record.empty and "Status" in last_record.columns:
+            last_status = str(last_record.iloc[0]["Status"]).strip()
 
-        # SAFETY RULES:
-        # If last status is Broken Down:
-        # - Block any "Check Out" attempt.
-        # - Encourage "Check In as Checked" (after repair) OR choose another equipment.
-        if last_status == "Broken Down":
-            if transaction_type == "Check Out":
-                is_blocked = True
-                blocked_reason = (
-                    f"**{selected_equipment}** was last reported **Broken Down**.\n\n"
-                    "➡️ You cannot *Check Out* this equipment.\n\n"
-                    "✅ Options:\n"
-                    "- Choose **another equipment**, **or**\n"
-                    "- After it is repaired, **Check In** this same equipment with **Situation = Checked** to mark it fixed."
-                )
+        if last_status == "Broken Down" and transaction == "Check Out":
+            is_blocked = True
+            blocked_reason = (
+                f"🚫 **Safety Valve**: **{selected_equipment}** is currently marked **Broken Down** "
+                f"(last update: {last_record.iloc[0]['DateTime']}).\n\n"
+                "You cannot **Check Out** this equipment.\n\n"
+                "✅ Please choose **another equipment**, or **after repair**, "
+                "submit a **Check In** for this item with **Status = Checked** to mark it fixed."
+            )
 
-    # Show a compact summary of the last record (if any)
+    # Last record preview
     if not last_record.empty:
-        with st.expander("🔎 Last record for this equipment"):
-            summary_cols = [c for c in ["Date", "Employee Name", "Selected_Equipment", "Transaction Type", "Situation", "Comments"] if c in last_record.columns]
-            if summary_cols:
-                st.table(last_record[summary_cols])
-            else:
-                st.write(last_record)
+        with st.expander("🔎 Last transaction for this equipment"):
+            cols = [c for c in ["DateTime", "User", "Equipment_Selected", "Transaction", "Status", "Comments"] if c in last_record.columns]
+            st.table(last_record[cols] if cols else last_record)
 
-    # Show blocking message
     if is_blocked:
         st.error(blocked_reason)
 
-    # Submit button (we enforce again below)
     submitted = st.form_submit_button("Submit", disabled=is_blocked)
 
 
@@ -211,41 +183,35 @@ with st.form("tools_form", clear_on_submit=True):
 # Handle submission
 # =========================
 if submitted:
-    # Validation
+    # Field validation
     if (
-        employee_name == "Please Select" or
-        transaction_type == "Please Select" or
-        situation == "Please Select" or
+        user == "Please Select" or
+        transaction == "Please Select" or
+        status == "Please Select" or
         not selected_equipment
     ):
-        st.warning("Please complete all required fields (employee, equipment, transaction, situation).")
+        st.warning("Please complete all required fields (User, Equipment_Selected, Transaction, Status).")
         st.stop()
-    if situation == "Broken Down" and not comments.strip():
+    if status == "Broken Down" and not comments.strip():
         st.warning("Please provide comments for the breakdown.")
         st.stop()
 
-    # Double-check safety (in case of race conditions)
+    # Re-check safety using DateTime (race-condition safe)
     df = load_tools_df(ws_tools)
-    last_record = df[df["Selected_Equipment"] == selected_equipment].sort_values(
-        by="Date", ascending=True, na_position="last"
-    ).tail(1)
-    last_status = None
-    if not last_record.empty:
-        if "Situation" in last_record.columns:
-            last_status = str(last_record.iloc[0]["Situation"]).strip()
-        elif "Status" in last_record.columns:
-            last_status = str(last_record.iloc[0]["Status"]).strip()
-        elif "Status_2" in last_record.columns:
-            last_status = str(last_record.iloc[0]["Status_2"]).strip()
-
-    if last_status == "Broken Down" and transaction_type == "Check Out":
+    last_record = (
+        df[df["Equipment_Selected"] == selected_equipment]
+        .sort_values(by="DateTime", ascending=True, na_position="last")
+        .tail(1)
+    )
+    last_status = str(last_record.iloc[0]["Status"]).strip() if not last_record.empty and "Status" in last_record.columns else None
+    if last_status == "Broken Down" and transaction == "Check Out":
         st.error(
-            f"Safety valve: **{selected_equipment}** cannot be *Checked Out* because it is marked **Broken Down**.\n\n"
-            "Please choose **another equipment** or **Check In** this one as **Checked** once it’s repaired."
+            f"Safety Valve: **{selected_equipment}** cannot be **Checked Out** because the last status is **Broken Down**.\n\n"
+            "Please choose another item or, after repair, **Check In** this equipment with **Status = Checked**."
         )
         st.stop()
 
-    # Save media to /tmp only now
+    # Save media to /tmp now
     picture_path = None
     if picture is not None:
         picture_path = "/tmp/picture.jpg"
@@ -258,14 +224,15 @@ if submitted:
         signature_path = "/tmp/signature.png"
         img.save(signature_path)
 
-    # Build record (align with your sheet columns)
+    # Build record EXACTLY as your schema
     record = {
-        "Date": date_string,
-        "Employee Name": employee_name,
+        "DateTime": date_string,           # full timestamp
+        "Date": date.isoformat(),          # date only
+        "User": user,
         "Equipment": equipment,
-        "Selected Equipment": selected_equipment,
-        "Transaction Type": transaction_type,
-        "Situation": situation,
+        "Equipment_Selected": selected_equipment,
+        "Transaction": transaction,
+        "Status": status,
         "Comments": comments,
     }
     out_df = pd.DataFrame([record])
@@ -277,11 +244,14 @@ if submitted:
         ws_tools.append_rows(out_df.values.tolist())
 
     # Optional email when a broken item is recorded
-    if situation == "Broken Down":
+    if status == "Broken Down":
         to_addr = st.secrets.get("email", {}).get("to_alert", st.secrets.get("email", {}).get("user"))
         if to_addr:
             subject = f"Equipment Broken Down: {selected_equipment}"
-            message = f"Equipment {selected_equipment} reported Broken Down by {employee_name}.\n\nRecord:\n{out_df.to_string(index=False)}"
+            message = (
+                f"Equipment {selected_equipment} reported Broken Down by {user}.\n\n"
+                f"Record:\n{out_df.to_string(index=False)}"
+            )
             send_email(to=to_addr, subject=subject, message=message, image_file=picture_path, image_file_2=signature_path)
 
     st.success("Form submitted successfully! (Form has been cleared.)")
