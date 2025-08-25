@@ -22,7 +22,6 @@ from email.mime.image import MIMEImage
 st.set_page_config(page_title="Tools / Equipment Inspection", layout="centered")
 st.title("🧑‍🔧 Tools / Equipment Inspection")
 
-# Optional banner
 if os.path.exists("Tools.png"):
     st.image(Image.open("Tools.png"))
 
@@ -51,15 +50,27 @@ def load_tools_df(ws) -> pd.DataFrame:
             "DateTime","Date","User","Equipment","Equipment_Selected","Transaction","Status","Comments"
         ])
     df = pd.DataFrame(values[1:], columns=values[0])
-    # normalize types
-    if "DateTime" in df.columns:
-        df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")  # <-- use for latest
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+
+    # Normalize column names exactly as expected
+    expected = ["DateTime","Date","User","Equipment","Equipment_Selected","Transaction","Status","Comments"]
+    missing = [c for c in expected if c not in df.columns]
+    if missing:
+        st.error(f"Missing expected columns in Sheet1: {missing}")
+        st.stop()
+
+    # Normalize string fields (trim spaces)
+    for col in ["User","Equipment","Equipment_Selected","Transaction","Status","Comments"]:
+        df[col] = df[col].astype(str).str.strip()
+
+    # Parse DateTime (use for latest); tolerate different formats
+    df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce", infer_datetime_format=True)
+
+    # Parse Date if present
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+
     return df
 
 def send_email(to, subject, message, image_file=None, image_file_2=None):
-    """Optional: email on 'Broken Down' records (requires [email] secrets)."""
     cfg = st.secrets.get("email", {})
     from_address = cfg.get("user")
     password = cfg.get("app_password")
@@ -95,7 +106,7 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
 
 
 # =========================
-# Catalog (adjust to your list)
+# Catalog (adjust if needed)
 # =========================
 equipments = [
     "", "Welding_Inverter", "Angle_Grinder_F180", "Angle_Grinder_F125", "POINT_4-KILL",
@@ -109,6 +120,27 @@ statuses = ["Checked", "Broken Down"]
 
 
 # =========================
+# Helpers
+# =========================
+def latest_row_for_equipment(df: pd.DataFrame, equip_selected: str) -> pd.Series | None:
+    """Get latest row by DateTime for a given Equipment_Selected; if all DateTime NaT, use last physical row."""
+    if not equip_selected:
+        return None
+    equip_selected = str(equip_selected).strip()
+    df_sel = df[df["Equipment_Selected"].astype(str).str.strip() == equip_selected]
+    if df_sel.empty:
+        return None
+
+    # Prefer rows with valid DateTime
+    df_valid = df_sel[df_sel["DateTime"].notna()]
+    if not df_valid.empty:
+        return df_valid.sort_values("DateTime").iloc[-1]
+
+    # Fallback: use last physical row entered
+    return df_sel.iloc[-1]
+
+
+# =========================
 # Form (auto clears)
 # =========================
 with st.form("tools_form", clear_on_submit=True):
@@ -117,7 +149,7 @@ with st.form("tools_form", clear_on_submit=True):
 
     c1, c2 = st.columns([1, 2])
     equipment = c1.selectbox("Equipment", equipments, index=0)
-    selected_equipment = c2.text_input("Equipment_Selected (or scan result)", value=equipment or "")
+    selected_equipment = c2.text_input("Equipment_Selected (or scan result)", value=(equipment or "")).strip()
 
     transaction = st.selectbox("Transaction", ["Please Select"] + transactions, index=0)
     status = st.selectbox("Status", ["Please Select"] + statuses, index=0)
@@ -135,43 +167,36 @@ with st.form("tools_form", clear_on_submit=True):
         key="canvas_tools",
     )
 
-    # --- SAFETY VALVE LOOKUP (uses DateTime to find latest) ---
+    # --- SAFETY VALVE LOOKUP (reads Web_App -> Sheet1) ---
     client = get_gspread_client()
     sheet = client.open("Web_App")
-    ws_tools = sheet.worksheet("Sheet1")  # ensure this exists
+    ws_tools = sheet.worksheet("Sheet1")  # <-- your worksheet
     df = load_tools_df(ws_tools)
 
-    last_record = pd.DataFrame()
+    last = latest_row_for_equipment(df, selected_equipment)
     is_blocked = False
     blocked_reason = ""
 
-    if selected_equipment:
-        # latest transaction by DateTime
-        last_record = (
-            df[df["Equipment_Selected"] == selected_equipment]
-            .sort_values(by="DateTime", ascending=True, na_position="last")
-            .tail(1)
-        )
+    if selected_equipment and last is not None:
+        last_status = str(last["Status"]).strip() if "Status" in last else None
+        last_dt_display = str(last["DateTime"]) if "DateTime" in last else "unknown time"
 
-        last_status = None
-        if not last_record.empty and "Status" in last_record.columns:
-            last_status = str(last_record.iloc[0]["Status"]).strip()
-
-        if last_status == "Broken Down" and transaction == "Check Out":
+        # Block Check Out when last status is Broken Down
+        if last_status and last_status.lower() == "broken down" and transaction == "Check Out":
             is_blocked = True
             blocked_reason = (
-                f"🚫 **Safety Valve**: **{selected_equipment}** is currently marked **Broken Down** "
-                f"(last update: {last_record.iloc[0]['DateTime']}).\n\n"
+                f"🚫 **Safety Valve**: **{selected_equipment}** is currently **Broken Down** "
+                f"(last update: {last_dt_display}).\n\n"
                 "You cannot **Check Out** this equipment.\n\n"
                 "✅ Please choose **another equipment**, or **after repair**, "
                 "submit a **Check In** for this item with **Status = Checked** to mark it fixed."
             )
 
-    # Last record preview
-    if not last_record.empty:
+    # Last transaction preview
+    if last is not None:
         with st.expander("🔎 Last transaction for this equipment"):
-            cols = [c for c in ["DateTime", "Date", "User", "Equipment", "Equipment_Selected", "Transaction", "Status", "Comments"] if c in last_record.columns]
-            st.table(last_record[cols] if cols else last_record)
+            preview_cols = [c for c in ["DateTime","User","Equipment_Selected","Transaction","Status","Comments"] if c in df.columns]
+            st.table(pd.DataFrame([last[preview_cols]]) if preview_cols else pd.DataFrame([last]))
 
     if is_blocked:
         st.error(blocked_reason)
@@ -183,7 +208,7 @@ with st.form("tools_form", clear_on_submit=True):
 # Handle submission
 # =========================
 if submitted:
-    # Field validation
+    # Validation
     if (
         user == "Please Select" or
         transaction == "Please Select" or
@@ -196,15 +221,11 @@ if submitted:
         st.warning("Please provide comments for the breakdown.")
         st.stop()
 
-    # Re-check safety using DateTime (race-condition safe)
+    # Re-check safety at submit time
     df = load_tools_df(ws_tools)
-    last_record = (
-        df[df["Equipment_Selected"] == selected_equipment]
-        .sort_values(by="DateTime", ascending=True, na_position="last")
-        .tail(1)
-    )
-    last_status = str(last_record.iloc[0]["Status"]).strip() if not last_record.empty and "Status" in last_record.columns else None
-    if last_status == "Broken Down" and transaction == "Check Out":
+    last = latest_row_for_equipment(df, selected_equipment)
+    last_status = (str(last["Status"]).strip() if last is not None and "Status" in last else None)
+    if last_status and last_status.lower() == "broken down" and transaction == "Check Out":
         st.error(
             f"Safety Valve: **{selected_equipment}** cannot be **Checked Out** because the last status is **Broken Down**.\n\n"
             "Please choose another item or, after repair, **Check In** this equipment with **Status = Checked**."
@@ -255,5 +276,3 @@ if submitted:
             send_email(to=to_addr, subject=subject, message=message, image_file=picture_path, image_file_2=signature_path)
 
     st.success("Form submitted successfully! (Form has been cleared.)")
-
-
