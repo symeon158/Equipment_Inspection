@@ -138,7 +138,7 @@ with st.form("tools_form", clear_on_submit=True):
     # --- SAFETY VALVE LOOKUP (uses DateTime to find latest) ---
     client = get_gspread_client()
     sheet = client.open("Web_App")
-    ws_tools = sheet.worksheet("Tools")  # ensure this exists
+    ws_tools = sheet.worksheet("Sheet1")  # ensure this exists
     df = load_tools_df(ws_tools)
 
     last_record = pd.DataFrame()
@@ -255,3 +255,4 @@ if submitted:
             send_email(to=to_addr, subject=subject, message=message, image_file=picture_path, image_file_2=signature_path)
 
     st.success("Form submitted successfully! (Form has been cleared.)")
+
