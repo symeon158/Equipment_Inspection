@@ -170,7 +170,7 @@ with st.form("tools_form", clear_on_submit=True):
     # Last record preview
     if not last_record.empty:
         with st.expander("🔎 Last transaction for this equipment"):
-            cols = [c for c in ["DateTime", "User", "Equipment_Selected", "Transaction", "Status", "Comments"] if c in last_record.columns]
+            cols = [c for c in ["DateTime", "Date", "User", "Equipment", "Equipment_Selected", "Transaction", "Status", "Comments"] if c in last_record.columns]
             st.table(last_record[cols] if cols else last_record)
 
     if is_blocked:
@@ -255,4 +255,5 @@ if submitted:
             send_email(to=to_addr, subject=subject, message=message, image_file=picture_path, image_file_2=signature_path)
 
     st.success("Form submitted successfully! (Form has been cleared.)")
+
 
