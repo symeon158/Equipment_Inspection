@@ -70,6 +70,45 @@ def load_tools_df(ws) -> pd.DataFrame:
 
     return df
 
+# ---------- DEBUG: show last transaction per Equipment_Selected ----------
+
+def compute_last_by_equipment(df: pd.DataFrame) -> pd.DataFrame:
+    # Clean strings
+    for c in ["Equipment_Selected", "User", "Transaction", "Status", "Comments"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.strip()
+
+    # Keep an original row order to break ties
+    df = df.copy()
+    df["_row"] = range(len(df))
+
+    # Parse DateTime (robust)
+    if "DateTime" in df.columns:
+        df["_dt"] = pd.to_datetime(df["DateTime"], errors="coerce", infer_datetime_format=True)
+    else:
+        # If the column is missing (shouldn't be), create a NaT column
+        df["_dt"] = pd.NaT
+
+    # Normalized equipment key
+    df["_equip"] = df["Equipment_Selected"].astype(str).str.strip()
+
+    # Sort by equipment, then parsed datetime, then original order
+    df_sorted = df.sort_values(["_equip", "_dt", "_row"], ascending=[True, True, True])
+
+    # Take the last row per equipment
+    last_by_equipment = df_sorted.dropna(subset=["_equip"]).drop_duplicates(subset=["_equip"], keep="last")
+
+    return last_by_equipment
+
+last_by_equipment = compute_last_by_equipment(df)
+
+st.subheader("🔎 Last transaction per Equipment_Selected")
+cols_display = [c for c in [
+    "Equipment_Selected", "DateTime", "User", "Transaction", "Status", "Comments"
+] if c in last_by_equipment.columns]
+st.dataframe(last_by_equipment[cols_display].reset_index(drop=True))
+
+
 def send_email(to, subject, message, image_file=None, image_file_2=None):
     cfg = st.secrets.get("email", {})
     from_address = cfg.get("user")
@@ -276,4 +315,5 @@ if submitted:
             send_email(to=to_addr, subject=subject, message=message, image_file=picture_path, image_file_2=signature_path)
 
     st.success("Form submitted successfully! (Form has been cleared.)")
+
 
