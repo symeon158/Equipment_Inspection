@@ -1,15 +1,33 @@
 import os
+import io
 import datetime
 import pandas as pd
+import numpy as np
 import streamlit as st
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
+# QR scanner (browser) – enlarged via CSS below
+HAS_BROWSER_QR = True
+try:
+    from streamlit_qrcode_scanner import qrcode_scanner
+except Exception:
+    HAS_BROWSER_QR = False
+
+# Optional static decode (snapshot/upload) with pyzbar + OpenCV
+HAS_PYZBAR = True
+try:
+    import cv2
+    from pyzbar.pyzbar import decode as pyzbar_decode
+except Exception:
+    HAS_PYZBAR = False
+
 # Google Sheets
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import gspread_dataframe as gsdf
 
-# Email (optional)
+# Email
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -17,20 +35,54 @@ from email.mime.image import MIMEImage
 
 
 # =========================
-# Page config
+# Page & CSS (make scanner big on tablets)
 # =========================
-st.set_page_config(page_title="Tools / Equipment Inspection", layout="centered")
-st.title("🧑‍🔧 Tools / Equipment Inspection")
+st.set_page_config(page_title="Tools Inspection", layout="wide")
+st.markdown("""
+<style>
+/* Make camera/video surfaces fill width & be taller */
+video, canvas {
+  width: 100% !important;
+  height: auto !important;
+  max-height: 70vh !important;
+}
 
-if os.path.exists("Tools.png"):
-    st.image(Image.open("Tools.png"))
-
-now = datetime.datetime.now()
-date_string = now.strftime("%Y-%m-%d %H:%M:%S")
+/* Give the main container some breathing room */
+.block-container {
+  padding-top: 1rem;
+  padding-left: 2rem;
+  padding-right: 2rem;
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 # =========================
-# Google Sheets via Secrets
+# Session defaults
+# =========================
+DEFAULTS = {
+    "warning_displayed": False,
+    "enable_camera": False,
+    "equipment_input": "",
+    "comments": "",
+    "sign": False,
+    "picture_path": None,
+    "signature_path": None,
+    "unique_key_1": "Please Select",   # employee
+    "unique_key_2": "",                # equipment dropdown
+    "unique_key_3": "Please Select",   # transaction
+    "unique_key_4": "Please Select",   # situation
+    "unique_key_6": "",                # comments key
+    "qr_mode": "Browser Scanner",      # selected QR mode
+    "scanning": False,                 # browser scanner toggle
+}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+
+# =========================
+# Config & Secrets
 # =========================
 SCOPE = [
     "https://spreadsheets.google.com/feeds",
@@ -43,77 +95,80 @@ def get_gspread_client():
     )
     return gspread.authorize(creds)
 
-def load_tools_df(ws) -> pd.DataFrame:
-    values = ws.get_all_values()
-    if not values:
-        return pd.DataFrame(columns=[
-            "DateTime","Date","User","Equipment","Equipment_Selected","Transaction","Status","Comments"
-        ])
-    df = pd.DataFrame(values[1:], columns=values[0])
+def send_email(to, subject, message, image_file=None, image_file_2=None):
+    """Gmail with TLS (587) and SSL (465) fallback. Uses Streamlit secrets."""
+    cfg = st.secrets["email"]
+    from_address = cfg["user"]
+    password = cfg["app_password"]
+    host = cfg.get("smtp_host", "smtp.gmail.com")
+    port_tls = int(cfg.get("smtp_port", 587))
 
-    # Ensure expected columns exist
-    expected = ["DateTime","Date","User","Equipment","Equipment_Selected","Transaction","Status","Comments"]
-    missing = [c for c in expected if c not in df.columns]
-    if missing:
-        st.error(f"Missing expected columns in Sheet1: {missing}")
-        st.stop()
+    msg = MIMEMultipart()
+    msg["From"] = from_address
+    msg["To"] = to if isinstance(to, str) else ", ".join(to)
+    msg["Subject"] = subject
+    msg.attach(MIMEText(message, "plain"))
 
-    # Normalize fields
-    for col in ["User","Equipment","Equipment_Selected","Transaction","Status","Comments"]:
-        df[col] = df[col].astype(str).str.strip()
+    for path, fname in [(image_file, "picture.jpg"), (image_file_2, "signature.png")]:
+        if path and os.path.exists(path):
+            with open(path, "rb") as f:
+                img = MIMEImage(f.read())
+                img.add_header("Content-Disposition", "attachment", filename=fname)
+                msg.attach(img)
 
-    # Parse DateTime & Date
-    df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce", infer_datetime_format=True)
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+    # Try STARTTLS
+    try:
+        server = smtplib.SMTP(host, port_tls)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(from_address, password)
+        server.sendmail(from_address, [to] if isinstance(to, str) else to, msg.as_string())
+        server.quit()
+        st.success("Email sent via TLS (587)!")
+        return
+    except Exception as e:
+        st.warning(f"TLS failed: {e}")
 
-    return df
+    # Fallback to SSL 465
+    try:
+        server = smtplib.SMTP_SSL(host, 465)
+        server.login(from_address, password)
+        server.sendmail(from_address, [to] if isinstance(to, str) else to, msg.as_string())
+        server.quit()
+        st.success("Email sent via SSL (465)!")
+    except Exception as e:
+        st.error(f"SSL failed: {e}")
 
 
-# ---------- helpers for "last record" ----------
-def compute_last_by_equipment(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["_row"] = range(len(df))
-    df["_dt"] = pd.to_datetime(df["DateTime"], errors="coerce", infer_datetime_format=True)
-    df["_equip"] = df["Equipment_Selected"].astype(str).str.strip()
-    df_sorted = df.sort_values(["_equip", "_dt", "_row"], ascending=[True, True, True])
-    last_by_equipment = (
-        df_sorted
-        .dropna(subset=["_equip"])
-        .drop_duplicates(subset=["_equip"], keep="last")
-    )
-    return last_by_equipment
-
-def latest_row_for_equipment(df: pd.DataFrame, equip_selected: str) -> pd.Series | None:
-    if not equip_selected:
+# =========================
+# QR helpers (snapshot/upload)
+# =========================
+def decode_image_bytes(image_bytes: bytes) -> str | None:
+    """Decode QR from an image buffer using pyzbar."""
+    if not HAS_PYZBAR:
         return None
-    equip_selected = str(equip_selected).strip()
-    df_sel = df[df["Equipment_Selected"].astype(str).str.strip() == equip_selected]
-    if df_sel.empty:
+    file_bytes = np.frombuffer(image_bytes, dtype='uint8')
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if img is None:
         return None
-    df_valid = df_sel[df_sel["DateTime"].notna()]
-    if not df_valid.empty:
-        return df_valid.sort_values("DateTime").iloc[-1]
-    return df_sel.iloc[-1]
+    codes = pyzbar_decode(img)
+    if codes:
+        return codes[0].data.decode("utf-8")
+    return None
 
 
 # =========================
-# Load Google Sheet NOW (so df exists)
+# UI
 # =========================
-client = get_gspread_client()
-sheet = client.open("Web_App")
-ws_tools = sheet.worksheet("Sheet1")  # your worksheet
-df = load_tools_df(ws_tools)
+st.title("⚙️ Tools Inspection")
 
-# ---------- DEBUG TABLE: last transaction per Equipment_Selected ----------
-last_by_equipment = compute_last_by_equipment(df)
-st.subheader("🔎 Last transaction per Equipment_Selected")
-cols_display = [c for c in ["Equipment_Selected","DateTime","User","Transaction","Status","Comments"] if c in last_by_equipment.columns]
-st.dataframe(last_by_equipment[cols_display].reset_index(drop=True))
+if os.path.exists("Tools.png"):
+    st.image(Image.open("Tools.png"))
 
+now = datetime.datetime.now()
+date_string = now.strftime("%Y-%m-%d %H:%M:%S")
 
-# =========================
-# Catalog (adjust if needed)
-# =========================
 equipments = [
     "", "Welding_Inverter", "Angle_Grinder_F180", "Angle_Grinder_F125", "POINT_4-KILL",
     "Hammer_Drills", "Rotary_Hammer_Drill", "Makita_Drill", "BLOWER", "Water_Pump",
@@ -121,139 +176,217 @@ equipments = [
     "Circular_Saw", "Power_Strip"
 ]
 employee_names = ["Please Select", "Alexandridis Christos", "Ntamaris Nikolaos", "Papadopoulos Symeon"]
-transactions = ["Check In", "Check Out"]
-statuses = ["Checked", "Broken Down"]
+
+# Form fields
+date = st.date_input("Date", datetime.date.today())
+employee_name = st.selectbox("Employee Name", employee_names, key="unique_key_1")
+
+col1, col2 = st.columns([1, 2])
+equipment = col1.selectbox("Equipment", equipments, key="unique_key_2")
+
+# Keep text field in sync
+if equipment:
+    st.session_state.equipment_input = equipment
+
+with col2:
+    st.subheader("🔎 QR Scanner")
+    qr_mode = st.selectbox(
+        "Mode",
+        ["Browser Scanner", "Snapshot/Upload"],
+        index=["Browser Scanner", "Snapshot/Upload"].index(st.session_state.qr_mode),
+        key="qr_mode"
+    )
+
+    if qr_mode == "Browser Scanner":
+        if not HAS_BROWSER_QR:
+            st.warning("Browser QR scanner not available. Try Snapshot/Upload.")
+        else:
+            # Start/Stop controls (full-width area, bigger preview due to CSS above)
+            if not st.session_state.scanning:
+                if st.button("📷 Start Scanning", use_container_width=True):
+                    st.session_state.scanning = True
+            else:
+                code = qrcode_scanner(key="qr_tools")
+                if code:
+                    st.session_state.equipment_input = code
+                    st.success(f"QR: {code}")
+                    st.session_state.scanning = False
+                if st.button("❌ Stop Scanning", use_container_width=True):
+                    st.session_state.scanning = False
+
+    else:  # Snapshot / Upload
+        st.caption("Take a photo or upload an image with a QR code; static decoding is often more accurate.")
+        upl = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"], accept_multiple_files=False, key="qr_upload")
+        snap = st.camera_input("Or take a snapshot")
+
+        decoded_val = None
+        if upl is not None:
+            decoded_val = decode_image_bytes(upl.getvalue()) if HAS_PYZBAR else None
+        elif snap is not None:
+            decoded_val = decode_image_bytes(snap.getvalue()) if HAS_PYZBAR else None
+
+        if decoded_val:
+            st.session_state.equipment_input = decoded_val
+            st.success(f"QR: {decoded_val}")
+        elif (upl or snap) and not decoded_val:
+            st.warning("Could not detect a QR code. Try closer, steady, good lighting, and higher contrast.")
+
+# Display selected equipment (free text field the user can edit as well)
+st.text_input("Selected Equipment:", value=st.session_state.equipment_input)
+
+transaction_type = st.selectbox("Transaction Type", ["Please Select", "Check In", "Check Out"], key="unique_key_3")
+situation = st.selectbox("Situation", ["Please Select", "Checked", "Broken Down"], key="unique_key_4")
+
+def clear_warning():
+    st.session_state.warning_displayed = False
+
+comments = st.text_area("Comments", key="unique_key_6", on_change=clear_warning)
+st.session_state.comments = comments
+
+# Require comments if Broken Down
+if situation == "Broken Down":
+    if not st.session_state.get("comments", "").strip():
+        st.warning(f"Please provide comments for {st.session_state.get('equipment_input','')} breakdown.")
+        st.session_state["warning_displayed"] = True
+    else:
+        st.session_state["warning_displayed"] = False
 
 
 # =========================
-# Form (auto clears)
+# Media capture & Signature
 # =========================
-with st.form("tools_form", clear_on_submit=True):
-    date = st.date_input("Date", datetime.date.today())
-    user = st.selectbox("User", employee_names, index=0)
+def take_picture():
+    if st.button("📸 Enable Camera"):
+        st.session_state.enable_camera = True
 
-    c1, c2 = st.columns([1, 2])
-    equipment = c1.selectbox("Equipment", equipments, index=0)
-    selected_equipment = c2.text_input("Equipment_Selected (or scan result)", value=(equipment or "")).strip()
+    if st.session_state.get("enable_camera", False):
+        picture = st.camera_input("Take a Photo")
+        if picture is not None:
+            pic_path = "/tmp/picture.jpg"
+            with open(pic_path, "wb") as file:
+                file.write(picture.getbuffer())
+            st.image(picture, caption="Photo taken with camera")
+            st.session_state.picture_path = pic_path
 
-    transaction = st.selectbox("Transaction", ["Please Select"] + transactions, index=0)
-    status = st.selectbox("Status", ["Please Select"] + statuses, index=0)
-    comments = st.text_area("Comments (required if Broken Down)", max_chars=120, height=60)
+    if st.button("📷 Disable Camera"):
+        st.session_state.enable_camera = False
 
-    # Optional media
-    picture = st.camera_input("Take a Photo (optional)")
-    signature_canvas = st_canvas(
-        fill_color="rgba(255,165,0,0.3)",
+def signature():
+    canvas_result = st_canvas(
+        fill_color="rgba(255, 165, 0, 0.3)",
         stroke_width=5,
-        stroke_color="rgb(0,0,0)",
-        background_color="rgba(255,255,255,1)",
+        stroke_color="rgb(0, 0, 0)",
+        background_color="rgba(255, 255, 255, 1)",
         height=150,
         drawing_mode="freedraw",
         key="canvas_tools",
     )
+    if canvas_result.image_data is not None:
+        st.image(canvas_result.image_data)
+        img = Image.fromarray(canvas_result.image_data.astype("uint8"), "RGBA")
+        sig_path = "/tmp/image1.png"
+        img.save(sig_path)
+        st.session_state.signature_path = sig_path
 
-    # --- SAFETY VALVE: use latest row (by DateTime) ---
-    last = latest_row_for_equipment(df, selected_equipment)
-    is_blocked = False
-    blocked_reason = ""
-
-    if selected_equipment and last is not None:
-        last_status = str(last["Status"]).strip().lower() if "Status" in last else None
-        last_dt_display = str(last["DateTime"]) if "DateTime" in last else "unknown time"
-
-        if last_status == "broken down" and transaction == "Check Out":
-            is_blocked = True
-            blocked_reason = (
-                f"🚫 **Safety Valve**: **{selected_equipment}** is currently **Broken Down** "
-                f"(last update: {last_dt_display}).\n\n"
-                "You cannot **Check Out** this equipment.\n\n"
-                "✅ Please choose **another equipment**, or **after repair**, "
-                "submit a **Check In** for this item with **Status = Checked** to mark it fixed."
-            )
-
-    # Last transaction preview
-    if last is not None:
-        with st.expander("🔎 Last transaction for this equipment"):
-            preview_cols = [c for c in ["DateTime","User","Equipment_Selected","Transaction","Status","Comments"] if c in df.columns]
-            st.table(pd.DataFrame([last[preview_cols]]) if preview_cols else pd.DataFrame([last]))
-
-    if is_blocked:
-        st.error(blocked_reason)
-
-    submitted = st.form_submit_button("Submit", disabled=is_blocked)
+take_picture()
+if st.checkbox("Signature", key="sign"):
+    signature()
 
 
 # =========================
-# Handle submission
+# Submit
 # =========================
-if submitted:
-    # Validation
+def reset_form():
+    for k, v in DEFAULTS.items():
+        st.session_state[k] = v
+
+if st.button("Submit"):
+    # Validate basic fields
     if (
-        user == "Please Select" or
-        transaction == "Please Select" or
-        status == "Please Select" or
-        not selected_equipment
+        employee_name == "Please Select"
+        or transaction_type == "Please Select"
+        or situation == "Please Select"
+        or not st.session_state.equipment_input
+        or (situation == "Broken Down" and not comments.strip())
     ):
-        st.warning("Please complete all required fields (User, Equipment_Selected, Transaction, Status).")
-        st.stop()
-    if status == "Broken Down" and not comments.strip():
-        st.warning("Please provide comments for the breakdown.")
+        st.warning("Please complete all required fields (and add comments if Broken Down).")
         st.stop()
 
-    # Re-check safety using a fresh df (race-condition safe)
-    df = load_tools_df(ws_tools)
-    last = latest_row_for_equipment(df, selected_equipment)
-    last_status = (str(last["Status"]).strip().lower() if last is not None and "Status" in last else None)
-    if last_status == "broken down" and transaction == "Check Out":
-        st.error(
-            f"Safety Valve: **{selected_equipment}** cannot be **Checked Out** because the last status is **Broken Down**.\n\n"
-            "Please choose another item or, after repair, **Check In** this equipment with **Status = Checked**."
-        )
-        st.stop()
+    # Sheets client & worksheet
+    client = get_gspread_client()
+    sheet = client.open("Web_App")
+    worksheet = sheet.worksheet("Sheet1")  # Tools transactions sheet
 
-    # Save media
-    picture_path = None
-    if picture is not None:
-        picture_path = "/tmp/picture.jpg"
-        with open(picture_path, "wb") as f:
-            f.write(picture.getbuffer())
+    # Current DF (safe if empty)
+    try:
+        df_existing = gsdf.get_as_dataframe(worksheet).dropna(how="all")
+    except Exception:
+        df_existing = pd.DataFrame()
 
-    signature_path = None
-    if signature_canvas.image_data is not None:
-        img = Image.fromarray(signature_canvas.image_data.astype("uint8"), "RGBA")
-        signature_path = "/tmp/signature.png"
-        img.save(signature_path)
-
-    # Build record EXACTLY as your schema
-    record = {
-        "DateTime": date_string,
-        "Date": date.isoformat(),
-        "User": user,
-        "Equipment": equipment,
-        "Equipment_Selected": selected_equipment,
-        "Transaction": transaction,
-        "Status": status,
-        "Comments": comments,
-    }
-    out_df = pd.DataFrame([record])
-
-    # Append to Google Sheet
-    if not ws_tools.row_values(1):
-        ws_tools.append_rows([out_df.columns.tolist()] + out_df.values.tolist())
-    else:
-        ws_tools.append_rows(out_df.values.tolist())
-
-    # Optional email when Broken Down
-    if status == "Broken Down":
-        cfg = st.secrets.get("email", {})
-        to_addr = cfg.get("to_alert", cfg.get("user"))
-        if to_addr:
-            subject = f"Equipment Broken Down: {selected_equipment}"
-            message = (
-                f"Equipment {selected_equipment} reported Broken Down by {user}.\n\n"
-                f"Record:\n{out_df.to_string(index=False)}"
+    # Block checkout if last was Broken Down
+    if not df_existing.empty and "Selected Equipment" in df_existing.columns and "Situation" in df_existing.columns:
+        last_record = df_existing[df_existing["Selected Equipment"] == st.session_state.equipment_input].tail(1)
+        if (
+            not last_record.empty
+            and last_record.iloc[0].get("Situation") == "Broken Down"
+            and transaction_type == "Check Out"
+        ):
+            st.error(
+                "The last transaction for this equipment was 'Broken Down'. "
+                "Please select a different equipment or choose 'Check In' / 'Checked'."
             )
-            send_email(to=to_addr, subject=subject, message=message,
-                       image_file=picture_path, image_file_2=signature_path)
+            st.stop()
 
-    st.success("Form submitted successfully! (Form has been cleared.)")
+    # New record
+    new_record = pd.DataFrame(
+        {
+            "DateTime": [date_string],
+            "FormDate": [date.isoformat()],
+            "Employee Name": [employee_name],
+            "Equipment": [equipment],
+            "Selected Equipment": [st.session_state.equipment_input],
+            "Transaction": [transaction_type],
+            "Situation": [situation],
+            "Comments": [comments],
+        }
+    )
+
+    # Append headers if sheet empty; else append rows
+    try:
+        has_header = bool(worksheet.row_values(1))
+    except Exception:
+        has_header = False
+
+    if not has_header:
+        worksheet.append_rows([new_record.columns.tolist()] + new_record.values.tolist())
+    else:
+        worksheet.append_rows(new_record.values.tolist())
+
+    # Email alert if Broken Down
+    if new_record.iloc[0]["Situation"] == "Broken Down":
+        to_addr = st.secrets["email"].get("to_alert", st.secrets["email"]["user"])
+        subject = "Equipment Broken Down"
+        msg = f"Equipment {st.session_state.equipment_input} is broken down. Last record:\n{new_record.to_string(index=False)}"
+        pic = st.session_state.get("picture_path")
+        sig = st.session_state.get("signature_path")
+        send_email(to=to_addr, subject=subject, message=msg, image_file=pic, image_file_2=sig)
+
+    # Show last transactions table
+    try:
+        df_all = gsdf.get_as_dataframe(worksheet).dropna(how="all")
+    except Exception:
+        df_all = new_record.copy()
+
+    if not df_all.empty and {"Selected Equipment", "DateTime"}.issubset(df_all.columns):
+        last_transaction_df = (
+            df_all.sort_values("DateTime")
+                 .groupby("Selected Equipment", as_index=False)
+                 .tail(1)
+                 .reset_index(drop=True)
+        )
+        st.subheader("Last transaction per equipment")
+        st.dataframe(last_transaction_df, use_container_width=True)
+
+    st.success("Form submitted successfully!")
+    st.button("Submit Another Form", on_click=reset_form)
+
