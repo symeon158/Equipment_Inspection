@@ -176,13 +176,12 @@ with st.form("tools_form", clear_on_submit=True):
     last = latest_row_for_equipment(df, selected_equipment)
     is_blocked = False
     blocked_reason = ""
-
+    
     if selected_equipment and last is not None:
-        last_status = str(last["Status"]).strip() if "Status" in last else None
+        last_status = str(last["Status"]).strip().lower() if "Status" in last else None
         last_dt_display = str(last["DateTime"]) if "DateTime" in last else "unknown time"
-
-        # Block Check Out when last status is Broken Down
-        if last_status and last_status.lower() == "broken down" and transaction == "Check Out":
+    
+        if last_status == "broken down" and transaction == "Check Out":
             is_blocked = True
             blocked_reason = (
                 f"🚫 **Safety Valve**: **{selected_equipment}** is currently **Broken Down** "
@@ -191,6 +190,7 @@ with st.form("tools_form", clear_on_submit=True):
                 "✅ Please choose **another equipment**, or **after repair**, "
                 "submit a **Check In** for this item with **Status = Checked** to mark it fixed."
             )
+
 
     # Last transaction preview
     if last is not None:
@@ -276,3 +276,4 @@ if submitted:
             send_email(to=to_addr, subject=subject, message=message, image_file=picture_path, image_file_2=signature_path)
 
     st.success("Form submitted successfully! (Form has been cleared.)")
+
