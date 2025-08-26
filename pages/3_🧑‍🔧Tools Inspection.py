@@ -40,22 +40,10 @@ from email.mime.image import MIMEImage
 st.set_page_config(page_title="Tools Inspection", layout="wide")
 st.markdown("""
 <style>
-/* Make camera/video surfaces fill width & be taller */
-video, canvas {
-  width: 100% !important;
-  height: auto !important;
-  max-height: 70vh !important;
-}
-
-/* Give the main container some breathing room */
-.block-container {
-  padding-top: 1rem;
-  padding-left: 2rem;
-  padding-right: 2rem;
-}
+video, canvas { width: 100% !important; height: auto !important; max-height: 70vh !important; }
+.block-container { padding-top: 1rem; padding-left: 2rem; padding-right: 2rem; }
 </style>
 """, unsafe_allow_html=True)
-
 
 # =========================
 # Session defaults
@@ -68,26 +56,22 @@ DEFAULTS = {
     "sign": False,
     "picture_path": None,
     "signature_path": None,
-    "unique_key_1": "Please Select",   # employee
+    "unique_key_1": "Please Select",   # user
     "unique_key_2": "",                # equipment dropdown
     "unique_key_3": "Please Select",   # transaction
-    "unique_key_4": "Please Select",   # situation
+    "unique_key_4": "Please Select",   # status
     "unique_key_6": "",                # comments key
-    "qr_mode": "Browser Scanner",      # selected QR mode
-    "scanning": False,                 # browser scanner toggle
+    "qr_mode": "Browser Scanner",
+    "scanning": False,
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-
 # =========================
 # Config & Secrets
 # =========================
-SCOPE = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
+SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
 def get_gspread_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(
@@ -96,7 +80,6 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 def send_email(to, subject, message, image_file=None, image_file_2=None):
-    """Gmail with TLS (587) and SSL (465) fallback. Uses Streamlit secrets."""
     cfg = st.secrets["email"]
     from_address = cfg["user"]
     password = cfg["app_password"]
@@ -116,36 +99,30 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
                 img.add_header("Content-Disposition", "attachment", filename=fname)
                 msg.attach(img)
 
-    # Try STARTTLS
     try:
         server = smtplib.SMTP(host, port_tls)
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
+        server.ehlo(); server.starttls(); server.ehlo()
         server.login(from_address, password)
         server.sendmail(from_address, [to] if isinstance(to, str) else to, msg.as_string())
         server.quit()
-        st.success("Email sent via TLS (587)!")
+        st.toast("Email sent (TLS 587).")
         return
-    except Exception as e:
-        st.warning(f"TLS failed: {e}")
+    except Exception:
+        pass
 
-    # Fallback to SSL 465
     try:
         server = smtplib.SMTP_SSL(host, 465)
         server.login(from_address, password)
         server.sendmail(from_address, [to] if isinstance(to, str) else to, msg.as_string())
         server.quit()
-        st.success("Email sent via SSL (465)!")
+        st.toast("Email sent (SSL 465).")
     except Exception as e:
-        st.error(f"SSL failed: {e}")
-
+        st.warning(f"Email send failed: {e}")
 
 # =========================
 # QR helpers (snapshot/upload)
 # =========================
 def decode_image_bytes(image_bytes: bytes) -> str | None:
-    """Decode QR from an image buffer using pyzbar."""
     if not HAS_PYZBAR:
         return None
     file_bytes = np.frombuffer(image_bytes, dtype='uint8')
@@ -156,7 +133,6 @@ def decode_image_bytes(image_bytes: bytes) -> str | None:
     if codes:
         return codes[0].data.decode("utf-8")
     return None
-
 
 # =========================
 # UI
@@ -177,9 +153,9 @@ equipments = [
 ]
 employee_names = ["Please Select", "Alexandridis Christos", "Ntamaris Nikolaos", "Papadopoulos Symeon"]
 
-# Form fields
+# --- Form fields
 date = st.date_input("Date", datetime.date.today())
-employee_name = st.selectbox("Employee Name", employee_names, key="unique_key_1")
+user = st.selectbox("User", employee_names, key="unique_key_1")
 
 col1, col2 = st.columns([1, 2])
 equipment = col1.selectbox("Equipment", equipments, key="unique_key_2")
@@ -201,7 +177,6 @@ with col2:
         if not HAS_BROWSER_QR:
             st.warning("Browser QR scanner not available. Try Snapshot/Upload.")
         else:
-            # Start/Stop controls (full-width area, bigger preview due to CSS above)
             if not st.session_state.scanning:
                 if st.button("📷 Start Scanning", use_container_width=True):
                     st.session_state.scanning = True
@@ -213,29 +188,26 @@ with col2:
                     st.session_state.scanning = False
                 if st.button("❌ Stop Scanning", use_container_width=True):
                     st.session_state.scanning = False
-
-    else:  # Snapshot / Upload
+    else:
         st.caption("Take a photo or upload an image with a QR code; static decoding is often more accurate.")
         upl = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"], accept_multiple_files=False, key="qr_upload")
         snap = st.camera_input("Or take a snapshot")
-
         decoded_val = None
         if upl is not None:
             decoded_val = decode_image_bytes(upl.getvalue()) if HAS_PYZBAR else None
         elif snap is not None:
             decoded_val = decode_image_bytes(snap.getvalue()) if HAS_PYZBAR else None
-
         if decoded_val:
             st.session_state.equipment_input = decoded_val
             st.success(f"QR: {decoded_val}")
         elif (upl or snap) and not decoded_val:
             st.warning("Could not detect a QR code. Try closer, steady, good lighting, and higher contrast.")
 
-# Display selected equipment (free text field the user can edit as well)
-st.text_input("Selected Equipment:", value=st.session_state.equipment_input)
+# Free-text the user can tweak
+st.text_input("Equipment_Selected:", value=st.session_state.equipment_input)
 
-transaction_type = st.selectbox("Transaction Type", ["Please Select", "Check In", "Check Out"], key="unique_key_3")
-situation = st.selectbox("Situation", ["Please Select", "Checked", "Broken Down"], key="unique_key_4")
+transaction = st.selectbox("Transaction", ["Please Select", "Check In", "Check Out"], key="unique_key_3")
+status = st.selectbox("Status", ["Please Select", "Checked", "Broken Down"], key="unique_key_4")
 
 def clear_warning():
     st.session_state.warning_displayed = False
@@ -244,13 +216,12 @@ comments = st.text_area("Comments", key="unique_key_6", on_change=clear_warning)
 st.session_state.comments = comments
 
 # Require comments if Broken Down
-if situation == "Broken Down":
+if status == "Broken Down":
     if not st.session_state.get("comments", "").strip():
         st.warning(f"Please provide comments for {st.session_state.get('equipment_input','')} breakdown.")
         st.session_state["warning_displayed"] = True
     else:
         st.session_state["warning_displayed"] = False
-
 
 # =========================
 # Media capture & Signature
@@ -258,7 +229,6 @@ if situation == "Broken Down":
 def take_picture():
     if st.button("📸 Enable Camera"):
         st.session_state.enable_camera = True
-
     if st.session_state.get("enable_camera", False):
         picture = st.camera_input("Take a Photo")
         if picture is not None:
@@ -267,7 +237,6 @@ def take_picture():
                 file.write(picture.getbuffer())
             st.image(picture, caption="Photo taken with camera")
             st.session_state.picture_path = pic_path
-
     if st.button("📷 Disable Camera"):
         st.session_state.enable_camera = False
 
@@ -292,6 +261,51 @@ take_picture()
 if st.checkbox("Signature", key="sign"):
     signature()
 
+# =========================
+# Safety Valve helpers (Sheet1 schema)
+# =========================
+SHEET_COLUMNS = ["DateTime","Date","User","Equipment","Equipment_Selected","Transaction","Status","Comments"]
+
+def load_df_sheet1(ws) -> pd.DataFrame:
+    """Load as DataFrame with Sheet1 schema, robust parsing & stripping."""
+    try:
+        values = ws.get_all_values()
+    except Exception:
+        return pd.DataFrame(columns=SHEET_COLUMNS)
+
+    if not values:
+        return pd.DataFrame(columns=SHEET_COLUMNS)
+
+    df = pd.DataFrame(values[1:], columns=values[0])
+
+    # Ensure all expected columns exist
+    missing = [c for c in SHEET_COLUMNS if c not in df.columns]
+    if missing:
+        st.error(f"Sheet1 is missing columns: {missing}")
+        st.stop()
+
+    # Normalize
+    for c in ["User","Equipment","Equipment_Selected","Transaction","Status","Comments"]:
+        df[c] = df[c].astype(str).str.strip()
+
+    # Parse DateTime for ordering
+    df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce", infer_datetime_format=True)
+    # Parse Date (date-only)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+
+    return df
+
+def latest_row_for_equipment(df: pd.DataFrame, equip_selected: str):
+    if not equip_selected:
+        return None
+    key = str(equip_selected).strip()
+    sel = df[df["Equipment_Selected"].astype(str).str.strip() == key]
+    if sel.empty:
+        return None
+    with_dt = sel[sel["DateTime"].notna()]
+    if not with_dt.empty:
+        return with_dt.sort_values("DateTime").iloc[-1]
+    return sel.iloc[-1]
 
 # =========================
 # Submit
@@ -303,11 +317,11 @@ def reset_form():
 if st.button("Submit"):
     # Validate basic fields
     if (
-        employee_name == "Please Select"
-        or transaction_type == "Please Select"
-        or situation == "Please Select"
+        user == "Please Select"
+        or transaction == "Please Select"
+        or status == "Please Select"
         or not st.session_state.equipment_input
-        or (situation == "Broken Down" and not comments.strip())
+        or (status == "Broken Down" and not comments.strip())
     ):
         st.warning("Please complete all required fields (and add comments if Broken Down).")
         st.stop()
@@ -315,78 +329,71 @@ if st.button("Submit"):
     # Sheets client & worksheet
     client = get_gspread_client()
     sheet = client.open("Web_App")
-    worksheet = sheet.worksheet("Sheet1")  # Tools transactions sheet
+    ws = sheet.worksheet("Sheet1")  # <-- your Sheet1
 
-    # Current DF (safe if empty)
-    try:
-        df_existing = gsdf.get_as_dataframe(worksheet).dropna(how="all")
-    except Exception:
-        df_existing = pd.DataFrame()
-
-    # Block checkout if last was Broken Down
-    if not df_existing.empty and "Selected Equipment" in df_existing.columns and "Situation" in df_existing.columns:
-        last_record = df_existing[df_existing["Selected Equipment"] == st.session_state.equipment_input].tail(1)
-        if (
-            not last_record.empty
-            and last_record.iloc[0].get("Situation") == "Broken Down"
-            and transaction_type == "Check Out"
-        ):
+    # -------- SAFETY VALVE: block Check Out if last status is Broken Down --------
+    df_sheet = load_df_sheet1(ws)
+    last = latest_row_for_equipment(df_sheet, st.session_state.equipment_input)
+    if last is not None:
+        last_status = str(last["Status"]).strip().lower()
+        last_dt = last["DateTime"]
+        if last_status == "broken down" and transaction == "Check Out":
             st.error(
-                "The last transaction for this equipment was 'Broken Down'. "
-                "Please select a different equipment or choose 'Check In' / 'Checked'."
+                f"🚫 Safety Valve: **{st.session_state.equipment_input}** is currently **Broken Down** "
+                f"(last update: {last_dt}).\n\n"
+                "You cannot **Check Out** this equipment.\n\n"
+                "✅ Choose another equipment, or after repair, **Check In** this item with **Status = Checked**."
             )
             st.stop()
 
-    # New record
+    # New record (Sheet1 schema)
     new_record = pd.DataFrame(
         {
-            "DateTime": [date_string],
-            "FormDate": [date.isoformat()],
-            "Employee Name": [employee_name],
+            "DateTime": [date_string],             # timestamp
+            "Date": [date.isoformat()],            # date-only
+            "User": [user],
             "Equipment": [equipment],
-            "Selected Equipment": [st.session_state.equipment_input],
-            "Transaction": [transaction_type],
-            "Situation": [situation],
+            "Equipment_Selected": [st.session_state.equipment_input],
+            "Transaction": [transaction],
+            "Status": [status],
             "Comments": [comments],
         }
     )
 
-    # Append headers if sheet empty; else append rows
+    # Append headers if empty; else append rows
     try:
-        has_header = bool(worksheet.row_values(1))
+        has_header = bool(ws.row_values(1))
     except Exception:
         has_header = False
 
     if not has_header:
-        worksheet.append_rows([new_record.columns.tolist()] + new_record.values.tolist())
+        ws.append_rows([new_record.columns.tolist()] + new_record.values.tolist())
     else:
-        worksheet.append_rows(new_record.values.tolist())
+        ws.append_rows(new_record.values.tolist())
 
     # Email alert if Broken Down
-    if new_record.iloc[0]["Situation"] == "Broken Down":
+    if new_record.iloc[0]["Status"] == "Broken Down":
         to_addr = st.secrets["email"].get("to_alert", st.secrets["email"]["user"])
-        subject = "Equipment Broken Down"
-        msg = f"Equipment {st.session_state.equipment_input} is broken down. Last record:\n{new_record.to_string(index=False)}"
+        subject = f"Equipment Broken Down: {st.session_state.equipment_input}"
+        msg = f"Equipment {st.session_state.equipment_input} reported Broken Down by {user}.\n\n{new_record.to_string(index=False)}"
         pic = st.session_state.get("picture_path")
         sig = st.session_state.get("signature_path")
         send_email(to=to_addr, subject=subject, message=msg, image_file=pic, image_file_2=sig)
 
-    # Show last transactions table
-    try:
-        df_all = gsdf.get_as_dataframe(worksheet).dropna(how="all")
-    except Exception:
-        df_all = new_record.copy()
-
-    if not df_all.empty and {"Selected Equipment", "DateTime"}.issubset(df_all.columns):
-        last_transaction_df = (
+    # Show last transactions table (sanity view)
+    df_all = load_df_sheet1(ws)
+    if not df_all.empty:
+        last_per_equipment = (
             df_all.sort_values("DateTime")
-                 .groupby("Selected Equipment", as_index=False)
+                 .groupby("Equipment_Selected", as_index=False)
                  .tail(1)
                  .reset_index(drop=True)
         )
-        st.subheader("Last transaction per equipment")
-        st.dataframe(last_transaction_df, use_container_width=True)
+        st.subheader("Last transaction per Equipment_Selected")
+        st.dataframe(
+            last_per_equipment[["Equipment_Selected","DateTime","User","Transaction","Status","Comments"]],
+            use_container_width=True
+        )
 
     st.success("Form submitted successfully!")
     st.button("Submit Another Form", on_click=reset_form)
-
