@@ -151,7 +151,7 @@ equipments = [
     "Jigsaw", "Roter_Trypio", "MPALANTEZA", "WORLD_HEATING_AIR_DW_IT_2000W",
     "Circular_Saw", "Power_Strip"
 ]
-employee_names = ["Please Select", "Alexandridis Christos", "Ntamaris Nikolaos", "Papadopoulos Symeon"]
+employee_names = ["Please Select", "Giannis Papadopoulos", "Konstantinos Papadopoulos", "Papadopoulos Symeon"]
 
 # --- Form fields
 date = st.date_input("Date", datetime.date.today())
@@ -397,3 +397,4 @@ if st.button("Submit"):
 
     st.success("Form submitted successfully!")
     st.button("Submit Another Form", on_click=reset_form)
+
