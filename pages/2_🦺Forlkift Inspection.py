@@ -46,8 +46,8 @@ DEFAULTS = {
     "enable_camera": False,
     "picture_path": None,
     "signature_path": None,
-    "name1": "Please Select",       # employee
-    "name2": "Please Select",       # forklift id
+    "name1": "Please Select",      # employee
+    "name2": "Please Select",      # forklift id
     "sign": False,
 }
 for k, v in DEFAULTS.items():
@@ -82,7 +82,7 @@ def send_email(to, subject, message, image_file=None, image_file_2=None):
     msg["From"] = from_address
     msg["To"] = to if isinstance(to, str) else ", ".join(to)
     msg["Subject"] = subject
-    msg.attach(MIMEText(message, "plain"))
+    msg.attach(MIMEText(message, "html"))
 
     for path, fname in [(image_file, "Forklift_Damage.jpg"), (image_file_2, "signature.png")]:
         if path and os.path.exists(path):
@@ -241,9 +241,18 @@ if st.button("Submit_Form"):
         for i in range(len(inspection_fields))
     )
     if critical_broken:
+        st.error("STOP! Immediately stop the forklift and inform your Supervisor.")
         to_addr = st.secrets["email"].get("to_alert", st.secrets["email"]["user"])
         subject = "Forklift Broken Down"
-        message = f"Forklift {forklift_id} is broken down. Last record:\n{df.to_string(index=False)}"
+        message = f"""
+        <html>
+        <head></head>
+        <body>
+            <p>Forklift {forklift_id} is broken down. Last record:</p>
+            {df.to_html(index=False)}
+        </body>
+        </html>
+        """
         send_email(
             to=to_addr,
             subject=subject,
@@ -253,7 +262,5 @@ if st.button("Submit_Form"):
         )
 
     st.success("Form submitted successfully!")
-    
+
     st.button("Submit Another Form", on_click=reset_form)
-
-
