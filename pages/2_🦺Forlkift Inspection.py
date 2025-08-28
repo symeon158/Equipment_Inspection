@@ -165,12 +165,12 @@ def reset_form():
 date = st.date_input("Date", datetime.date.today())
 employee_name = st.selectbox(
     "Employee Name",
-    ["Please Select", "Simeon Papadopoulos", "Alexandridis Christos"],
+    ["Please Select", "Simeon Papadopoulos", "Konstantinos Papadopoulos"],
     key="name1"
 )
 forklift_id = st.selectbox(
     "Number of Forklifts",
-    ["Please Select", "ME 119135", "ME 125321"],
+    ["Please Select", "ME 123456", "ME 234567"],
     key="name2"
 )
 hours = st.number_input("Operation Hours (float)", format="%.1f", step=0.1)
@@ -264,3 +264,4 @@ if st.button("Submit_Form"):
     st.success("Form submitted successfully!")
 
     st.button("Submit Another Form", on_click=reset_form)
+
