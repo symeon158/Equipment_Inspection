@@ -2,7 +2,7 @@
 
 A **Streamlit-based web application suite** for industrial safety and asset management.  
 This project digitalizes inspection processes for **forklifts and tools**, logs inspection data to **Google Sheets**, and provides **interactive dashboards & reports** for management. It also features **email alerts** with attachments for critical issues.
-- 👉 Use the App [ESG Automation](https://equipmentinspection-yqeetjabdqqffip6b26ymg.streamlit.app/)
+- 👉 Use the App [Equipment & Forklift Inspection App](https://equipmentinspection-yqeetjabdqqffip6b26ymg.streamlit.app/)
 ---
 
 ## 🚀 Modules
