@@ -6,7 +6,7 @@ gspread
 oauth2client
 gspread-dataframe
 plotly
-opencv-python
+opencv-python-headless
 pyzbar
 streamlit-webrtc
 streamlit-qrcode-scanner
